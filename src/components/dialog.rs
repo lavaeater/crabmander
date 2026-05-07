@@ -111,27 +111,24 @@ impl DialogState {
 
     pub fn nav_up(&mut self) {
         match self {
-            Self::ContextMenu { selected, .. } | Self::QuickCd { selected, .. } => {
-                if *selected > 0 {
+            Self::ContextMenu { selected, .. } | Self::QuickCd { selected, .. }
+                if *selected > 0 => {
                     *selected -= 1;
                 }
-            }
             _ => {}
         }
     }
 
     pub fn nav_down(&mut self) {
         match self {
-            Self::ContextMenu { selected, items, .. } => {
-                if *selected + 1 < items.len() {
+            Self::ContextMenu { selected, items, .. }
+                if *selected + 1 < items.len() => {
                     *selected += 1;
                 }
-            }
-            Self::QuickCd { selected, matches, .. } => {
-                if *selected + 1 < matches.len() {
+            Self::QuickCd { selected, matches, .. }
+                if *selected + 1 < matches.len() => {
                     *selected += 1;
                 }
-            }
             _ => {}
         }
     }

@@ -878,7 +878,7 @@ fn quick_cd_list_dirs(parent: &std::path::Path, filter: &str) -> Vec<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| filter.is_empty() || name.to_lowercase().contains(&filter_lower))
         .collect();
-    dirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    dirs.sort_by_key(|a| a.to_lowercase());
     dirs
 }
 
