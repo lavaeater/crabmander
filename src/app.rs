@@ -301,6 +301,7 @@ impl App {
                 Action::Move => self.open_move_dialog(),
                 Action::Mkdir => self.open_mkdir_dialog(),
                 Action::Delete => self.open_delete_dialog(),
+                Action::View => self.open_nano_dialog(),
                 Action::ContextMenu => self.open_context_menu(),
 
                 // Async dir load
@@ -518,6 +519,22 @@ impl App {
         ));
     }
 
+    fn open_nano_dialog(&mut self) {
+        let base = self.active_panel().path.clone();
+        let prefill = self
+            .active_panel()
+            .current_entry()
+            .filter(|e| !e.is_dir && e.name != "..")
+            .map(|e| e.name.clone())
+            .unwrap_or_default();
+        self.open_dialog(DialogState::input(
+            "Open in Nano",
+            format!("File in {}:", base.display()),
+            prefill,
+            DeferredOp::OpenInNano { base },
+        ));
+    }
+
     fn open_context_menu(&mut self) {
         let Some(entry) = self.active_panel().current_entry() else {
             return;
@@ -692,6 +709,14 @@ impl App {
             DeferredOp::Mkdir { base } => {
                 let name = value.unwrap_or_default();
                 self.do_mkdir(base.join(name), active);
+            }
+
+            DeferredOp::OpenInNano { base } => {
+                let filename = value.unwrap_or_default();
+                if !filename.is_empty() {
+                    let path = base.join(&filename).to_string_lossy().into_owned();
+                    let _ = tx.send(Action::ExecuteFile { cmd: "nano".into(), args: vec![path] });
+                }
             }
 
             DeferredOp::Execute { path } => {

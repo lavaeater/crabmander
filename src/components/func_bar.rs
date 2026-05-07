@@ -3,7 +3,7 @@ use ratatui::{prelude::*, widgets::Paragraph};
 const KEYS: &[(&str, &str, bool)] = &[
     ("F1", "QuickCD", true),
     ("F2", "Menu", true),
-    ("F3", "View", false),
+    ("F3", "Nano", true),
     ("F4", "Edit", false),
     ("F5", "Copy", true),
     ("F6", "Move", true),

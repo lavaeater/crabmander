@@ -14,6 +14,7 @@ pub enum DeferredOp {
     Move { sources: Vec<PathBuf> },
     Mkdir { base: PathBuf },
     Execute { path: PathBuf },
+    OpenInNano { base: PathBuf },
 }
 
 // --- Context menu ---

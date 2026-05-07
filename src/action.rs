@@ -60,6 +60,7 @@ pub enum Action {
     Mkdir,
     Delete,
     ContextMenu, // F2
+    View,        // F3 — open in nano
 
     // Quick CD (F1)
     QuickCd,

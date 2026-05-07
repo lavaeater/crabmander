@@ -30,6 +30,7 @@
       // Operations
       "<f1>": "QuickCd",
       "<f2>": "ContextMenu",
+      "<f3>": "View",
       "<f5>": "Copy",
       "<f6>": "Move",
       "<f7>": "Mkdir",
