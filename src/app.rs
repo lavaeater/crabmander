@@ -158,10 +158,10 @@ impl App {
                 }
 
                 // Confirm-dialog y/n shortcuts
-                KeyCode::Char('y') | KeyCode::Char('Y') if is_confirm => {
+                KeyCode::Char('y' | 'Y') if is_confirm => {
                     tx.send(Action::DialogConfirm)?;
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') if is_confirm => {
+                KeyCode::Char('n' | 'N') if is_confirm => {
                     tx.send(Action::DialogCancel)?;
                 }
 
@@ -792,9 +792,9 @@ impl App {
                         return;
                     }
                 };
-                let dst = dest.join(name);
-                if tokio::fs::rename(src, &dst).await.is_err() {
-                    if let Err(e) = copy_recursive(src, &dst).await {
+                let dest_full_path = dest.join(name);
+                if tokio::fs::rename(src, &dest_full_path).await.is_err() {
+                    if let Err(e) = copy_recursive(src, &dest_full_path).await {
                         let _ = tx.send(Action::OpError(e.to_string()));
                         return;
                     }
