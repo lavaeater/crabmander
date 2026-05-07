@@ -40,9 +40,9 @@ fn install_desktop_entry() -> color_eyre::Result<()> {
         "[Desktop Entry]\n\
          Name=Crabmander\n\
          Comment=Twin-pane TUI file manager\n\
-         Exec=bash -c 'exec $(which alacritty kitty foot xterm 2>/dev/null | head -1) -e {exe_path}'\n\
+         Exec={exe_path}\n\
          Icon=utilities-file-manager\n\
-         Terminal=false\n\
+         Terminal=true\n\
          Type=Application\n\
          Categories=Utility;FileManager;\n\
          Keywords=files;manager;tui;\n"
