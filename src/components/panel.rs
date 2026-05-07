@@ -55,7 +55,11 @@ impl Panel {
         tokio::spawn(async move {
             match read_dir_entries(&path).await {
                 Ok(entries) => {
-                    let _ = tx.send(Action::DirLoaded { side, path, entries });
+                    let _ = tx.send(Action::DirLoaded {
+                        side,
+                        path,
+                        entries,
+                    });
                 }
                 Err(e) => {
                     let _ = tx.send(Action::Error(e.to_string()));
@@ -227,7 +231,9 @@ impl Panel {
     // --- Queries ---
 
     pub fn current_entry(&self) -> Option<&EntryInfo> {
-        self.view_indices.get(self.cursor).map(|&i| &self.entries[i])
+        self.view_indices
+            .get(self.cursor)
+            .map(|&i| &self.entries[i])
     }
 
     /// Alias for compatibility.
@@ -362,9 +368,7 @@ impl Panel {
                 if is_cursor && self.is_active {
                     row.style(Style::default().add_modifier(Modifier::REVERSED))
                 } else if is_cursor {
-                    row.style(
-                        Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM),
-                    )
+                    row.style(Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM))
                 } else if is_marked {
                     row.style(Style::default().fg(Color::Yellow))
                 } else if e.is_dir {
@@ -469,7 +473,10 @@ pub async fn extract_archive(archive: &Path, dest: &Path) -> color_eyre::Result<
     let d = dest.to_string_lossy();
 
     let status = if name.ends_with(".zip") {
-        Command::new("unzip").args([a.as_ref(), "-d", d.as_ref()]).status().await?
+        Command::new("unzip")
+            .args([a.as_ref(), "-d", d.as_ref()])
+            .status()
+            .await?
     } else if name.ends_with(".tar.gz")
         || name.ends_with(".tgz")
         || name.ends_with(".tar.bz2")
@@ -479,14 +486,20 @@ pub async fn extract_archive(archive: &Path, dest: &Path) -> color_eyre::Result<
         || name.ends_with(".tar.zst")
         || name.ends_with(".tar")
     {
-        Command::new("tar").args(["-xf", a.as_ref(), "-C", d.as_ref()]).status().await?
+        Command::new("tar")
+            .args(["-xf", a.as_ref(), "-C", d.as_ref()])
+            .status()
+            .await?
     } else if name.ends_with(".7z") {
         Command::new("7z")
             .args(["x", a.as_ref(), &format!("-o{}", d)])
             .status()
             .await?
     } else if name.ends_with(".rar") {
-        Command::new("unrar").args(["x", a.as_ref(), d.as_ref()]).status().await?
+        Command::new("unrar")
+            .args(["x", a.as_ref(), d.as_ref()])
+            .status()
+            .await?
     } else {
         return Err(eyre!("Unsupported archive type: {}", name));
     };
@@ -509,8 +522,8 @@ pub fn file_name_of(p: &Path) -> color_eyre::Result<String> {
 pub fn is_archive(name: &str) -> bool {
     let n = name.to_lowercase();
     [
-        ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
-        ".tar.zst", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst",
+        ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst",
+        ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst",
     ]
     .iter()
     .any(|ext| n.ends_with(ext))

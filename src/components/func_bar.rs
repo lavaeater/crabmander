@@ -1,7 +1,4 @@
-use ratatui::{
-    prelude::*,
-    widgets::Paragraph,
-};
+use ratatui::{prelude::*, widgets::Paragraph};
 
 const KEYS: &[(&str, &str, bool)] = &[
     ("F1", "QuickCD", true),

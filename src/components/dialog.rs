@@ -34,7 +34,10 @@ pub struct MenuItem {
 
 impl MenuItem {
     pub fn new(label: impl Into<String>, action: MenuAction) -> Self {
-        Self { label: label.into(), action }
+        Self {
+            label: label.into(),
+            action,
+        }
     }
 }
 
@@ -62,7 +65,7 @@ pub enum DialogState {
         input: String,
         matches: Vec<String>, // sorted dir names in the current parent
         selected: usize,
-        base_path: PathBuf,   // active panel's path at open time (for relative resolution)
+        base_path: PathBuf, // active panel's path at open time (for relative resolution)
     },
 }
 
@@ -112,23 +115,26 @@ impl DialogState {
     pub fn nav_up(&mut self) {
         match self {
             Self::ContextMenu { selected, .. } | Self::QuickCd { selected, .. }
-                if *selected > 0 => {
-                    *selected -= 1;
-                }
+                if *selected > 0 =>
+            {
+                *selected -= 1;
+            }
             _ => {}
         }
     }
 
     pub fn nav_down(&mut self) {
         match self {
-            Self::ContextMenu { selected, items, .. }
-                if *selected + 1 < items.len() => {
-                    *selected += 1;
-                }
-            Self::QuickCd { selected, matches, .. }
-                if *selected + 1 < matches.len() => {
-                    *selected += 1;
-                }
+            Self::ContextMenu {
+                selected, items, ..
+            } if *selected + 1 < items.len() => {
+                *selected += 1;
+            }
+            Self::QuickCd {
+                selected, matches, ..
+            } if *selected + 1 < matches.len() => {
+                *selected += 1;
+            }
             _ => {}
         }
     }
@@ -157,7 +163,12 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             frame.render_widget(para, popup);
         }
 
-        DialogState::Input { title, prompt, value, .. } => {
+        DialogState::Input {
+            title,
+            prompt,
+            value,
+            ..
+        } => {
             let popup = centered_rect(64, 8, area);
             frame.render_widget(Clear, popup);
             let block = Block::default()
@@ -181,8 +192,7 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
                 prompt_area,
             );
             frame.render_widget(
-                Paragraph::new(format!("{}_", value))
-                    .style(Style::default().fg(Color::White)),
+                Paragraph::new(format!("{}_", value)).style(Style::default().fg(Color::White)),
                 value_area,
             );
             frame.render_widget(
@@ -193,8 +203,15 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             );
         }
 
-        DialogState::QuickCd { input, matches, selected, .. } => {
-            let height = (matches.len() as u16 + 6).clamp(10, 24).min(area.height.saturating_sub(2));
+        DialogState::QuickCd {
+            input,
+            matches,
+            selected,
+            ..
+        } => {
+            let height = (matches.len() as u16 + 6)
+                .clamp(10, 24)
+                .min(area.height.saturating_sub(2));
             let popup = centered_rect(66, height, area);
             frame.render_widget(Clear, popup);
 
@@ -215,8 +232,11 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
 
             // Input line
             frame.render_widget(
-                Paragraph::new(format!("{}_", input))
-                    .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Paragraph::new(format!("{}_", input)).style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 input_area,
             );
 
@@ -256,7 +276,11 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             );
         }
 
-        DialogState::ContextMenu { title, items, selected } => {
+        DialogState::ContextMenu {
+            title,
+            items,
+            selected,
+        } => {
             let height = (items.len() as u16 + 4).min(area.height.saturating_sub(2));
             let popup = centered_rect(50, height, area);
             frame.render_widget(Clear, popup);
@@ -284,11 +308,7 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             let mut state = ListState::default();
             state.select(Some(*selected));
 
-            frame.render_stateful_widget(
-                List::new(list_items),
-                inner,
-                &mut state,
-            );
+            frame.render_stateful_widget(List::new(list_items), inner, &mut state);
         }
     }
 }

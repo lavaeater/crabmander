@@ -10,8 +10,8 @@ use crate::{
         dialog::{self, DeferredOp, DialogState, MenuAction, MenuItem},
         func_bar,
         panel::{
-            copy_recursive, delete_recursive, extract_archive, file_name_of, is_archive,
-            is_executable, Panel,
+            Panel, copy_recursive, delete_recursive, extract_archive, file_name_of, is_archive,
+            is_executable,
         },
     },
     config::Config,
@@ -132,7 +132,11 @@ impl App {
         let tx = self.action_tx.clone();
 
         if self.mode == Mode::Dialog {
-            let is_qcd = self.dialog.as_ref().map(|d| d.is_quick_cd()).unwrap_or(false);
+            let is_qcd = self
+                .dialog
+                .as_ref()
+                .map(|d| d.is_quick_cd())
+                .unwrap_or(false);
             let is_confirm = matches!(&self.dialog, Some(DialogState::Confirm { .. }));
 
             match key.code {
@@ -144,8 +148,11 @@ impl App {
                 // QuickCd-specific
                 KeyCode::Tab if is_qcd => tx.send(Action::QuickCdComplete)?,
                 KeyCode::Backspace if is_qcd => tx.send(Action::QuickCdBackspace)?,
-                KeyCode::Char(c) if is_qcd
-                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                KeyCode::Char(c)
+                    if is_qcd
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     tx.send(Action::QuickCdChar(c))?;
                 }
@@ -161,7 +168,9 @@ impl App {
                 // Input dialogs
                 KeyCode::Backspace => tx.send(Action::DialogInputBackspace)?,
                 KeyCode::Char(c)
-                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     tx.send(Action::DialogInputChar(c))?;
                 }
@@ -190,9 +199,9 @@ impl App {
                     // Unbound single key → filter input or Esc to clear filter.
                     match key.code {
                         KeyCode::Char(c)
-                            if !key.modifiers.intersects(
-                                KeyModifiers::CONTROL | KeyModifiers::ALT,
-                            ) =>
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                         {
                             tx.send(Action::FilterChar(c))?;
                         }
@@ -295,7 +304,11 @@ impl App {
                 Action::ContextMenu => self.open_context_menu(),
 
                 // Async dir load
-                Action::DirLoaded { side, path, entries } => {
+                Action::DirLoaded {
+                    side,
+                    path,
+                    entries,
+                } => {
                     self.get_panel_mut(side).on_dir_loaded(path, entries);
                 }
 
@@ -368,16 +381,18 @@ impl App {
             ])
             .areas(area);
 
-            let [left_area, right_area] = Layout::horizontal([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
-            .areas(panels_area);
+            let [left_area, right_area] =
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(panels_area);
 
             left.draw(frame, left_area);
             right.draw(frame, right_area);
 
-            let active_panel = if active == Side::Left { &*left } else { &*right };
+            let active_panel = if active == Side::Left {
+                &*left
+            } else {
+                &*right
+            };
             draw_status_bar(frame, status_area, active_panel, last_error.as_deref());
 
             func_bar::draw(frame, func_area);
@@ -524,7 +539,11 @@ impl App {
             "Open with OS (xdg-open)",
             MenuAction::OpenWithOs(path.clone()),
         ));
-        let code_dir = if is_dir { path.clone() } else { panel_dir.clone() };
+        let code_dir = if is_dir {
+            path.clone()
+        } else {
+            panel_dir.clone()
+        };
         items.push(MenuItem::new(
             "Run VS Code here",
             MenuAction::RunCodeHere(code_dir),
@@ -582,13 +601,20 @@ impl App {
                 self.last_error = None;
                 self.execute_op(op, Some(value));
             }
-            DialogState::ContextMenu { items, selected, .. } => {
+            DialogState::ContextMenu {
+                items, selected, ..
+            } => {
                 self.mode = Mode::Normal;
                 if let Some(item) = items.into_iter().nth(selected) {
                     self.execute_menu_action(item.action);
                 }
             }
-            DialogState::QuickCd { input, matches, selected, base_path } => {
+            DialogState::QuickCd {
+                input,
+                matches,
+                selected,
+                base_path,
+            } => {
                 self.mode = Mode::Normal;
                 let dest = quick_cd_destination(&input, &matches, selected, &base_path);
                 let side = self.active;
@@ -614,17 +640,17 @@ impl App {
             }
             MenuAction::RunCodeHere(dir) => {
                 tokio::spawn(async move {
-                    tokio::process::Command::new("code")
-                        .arg(dir)
-                        .spawn()
-                        .ok();
+                    tokio::process::Command::new("code").arg(dir).spawn().ok();
                 });
             }
             MenuAction::RequestExecute(path) => {
                 // Open an args dialog; on confirm → ExecuteFile
                 self.open_dialog(DialogState::input(
                     "Execute",
-                    format!("Arguments for {}:", path.file_name().unwrap_or_default().to_string_lossy()),
+                    format!(
+                        "Arguments for {}:",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
                     "",
                     DeferredOp::Execute { path },
                 ));
@@ -671,8 +697,7 @@ impl App {
             DeferredOp::Execute { path } => {
                 let cmd = path.to_string_lossy().into_owned();
                 let args_str = value.unwrap_or_default();
-                let args: Vec<String> =
-                    args_str.split_whitespace().map(String::from).collect();
+                let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
                 let _ = tx.send(Action::ExecuteFile { cmd, args });
             }
         }
@@ -694,12 +719,7 @@ impl App {
         });
     }
 
-    fn do_copy(
-        &self,
-        sources: Vec<std::path::PathBuf>,
-        dest: std::path::PathBuf,
-        active: Side,
-    ) {
+    fn do_copy(&self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
             for src in &sources {
@@ -719,12 +739,7 @@ impl App {
         });
     }
 
-    fn do_move(
-        &self,
-        sources: Vec<std::path::PathBuf>,
-        dest: std::path::PathBuf,
-        active: Side,
-    ) {
+    fn do_move(&self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
             for src in &sources {
@@ -770,8 +785,7 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
 
     if let Some(err) = error {
         frame.render_widget(
-            Paragraph::new(err)
-                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Paragraph::new(err).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             area,
         );
         return;
@@ -831,8 +845,12 @@ impl App {
     }
 
     fn refresh_quick_cd(&mut self) {
-        if let Some(DialogState::QuickCd { input, matches, selected, base_path }) =
-            &mut self.dialog
+        if let Some(DialogState::QuickCd {
+            input,
+            matches,
+            selected,
+            base_path,
+        }) = &mut self.dialog
         {
             let (parent, filter) = quick_cd_parse_input(input, base_path);
             *matches = quick_cd_list_dirs(&parent, &filter);
@@ -841,7 +859,13 @@ impl App {
     }
 
     fn quick_cd_complete_input(&self) -> Option<String> {
-        let DialogState::QuickCd { input, matches, selected, .. } = self.dialog.as_ref()? else {
+        let DialogState::QuickCd {
+            input,
+            matches,
+            selected,
+            ..
+        } = self.dialog.as_ref()?
+        else {
             return None;
         };
         let name = matches.get(*selected)?;
@@ -903,9 +927,9 @@ fn quick_cd_destination(
 }
 
 fn quick_cd_expand(s: &str) -> String {
-    if s.starts_with('~') {
+    if let Some(stripped) = s.strip_prefix('~') {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-        format!("{}{}", home, &s[1..])
+        format!("{}{}", home, stripped)
     } else {
         s.to_string()
     }
