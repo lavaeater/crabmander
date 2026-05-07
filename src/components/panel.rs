@@ -7,7 +7,7 @@ use std::{
 use color_eyre::eyre::eyre;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Row, Table},
+    widgets::{Block, Borders, Paragraph, Row, Table},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -17,11 +17,16 @@ pub struct Panel {
     pub side: Side,
     pub path: PathBuf,
     pub entries: Vec<EntryInfo>,
+    /// Indices into `entries` that pass the current filter (all entries when filter is empty).
+    pub view_indices: Vec<usize>,
+    /// Cursor position within `view_indices`.
     pub cursor: usize,
+    /// Scroll offset within `view_indices`.
     pub offset: usize,
     pub marked: HashSet<String>,
     pub is_active: bool,
     pub loading: bool,
+    pub filter: String,
     action_tx: UnboundedSender<Action>,
 }
 
@@ -31,11 +36,13 @@ impl Panel {
             side,
             path,
             entries: Vec::new(),
+            view_indices: Vec::new(),
             cursor: 0,
             offset: 0,
             marked: HashSet::new(),
             is_active: false,
             loading: false,
+            filter: String::new(),
             action_tx,
         }
     }
@@ -58,24 +65,70 @@ impl Panel {
     }
 
     pub fn on_dir_loaded(&mut self, path: PathBuf, entries: Vec<EntryInfo>) {
-        let prev_name = self.entries.get(self.cursor).map(|e| e.name.clone());
+        let prev_name = self.current_entry().map(|e| e.name.clone());
+        let path_changed = path != self.path;
         self.path = path;
         self.entries = entries;
-        self.marked.clear();
-        self.loading = false;
+        if path_changed {
+            self.filter.clear();
+        }
+        self.rebuild_view();
 
-        // Try to restore cursor to the same entry name; otherwise clamp.
         if let Some(name) = prev_name {
             self.cursor = self
-                .entries
+                .view_indices
                 .iter()
-                .position(|e| e.name == name)
+                .position(|&i| self.entries[i].name == name)
                 .unwrap_or(0);
         } else {
             self.cursor = 0;
         }
-        self.clamp_cursor();
+        self.loading = false;
     }
+
+    fn rebuild_view(&mut self) {
+        if self.filter.is_empty() {
+            self.view_indices = (0..self.entries.len()).collect();
+        } else {
+            let f = self.filter.to_lowercase();
+            self.view_indices = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.name == ".." || e.name.to_lowercase().contains(&f))
+                .map(|(i, _)| i)
+                .collect();
+        }
+        let max = self.view_indices.len().saturating_sub(1);
+        self.cursor = self.cursor.min(max);
+    }
+
+    // --- Filter ---
+
+    pub fn push_filter_char(&mut self, c: char) {
+        self.filter.push(c);
+        let prev_name = self.current_entry().map(|e| e.name.clone());
+        self.rebuild_view();
+        if let Some(name) = prev_name {
+            self.cursor = self
+                .view_indices
+                .iter()
+                .position(|&i| self.entries[i].name == name)
+                .unwrap_or(0);
+        }
+    }
+
+    pub fn pop_filter_char(&mut self) {
+        self.filter.pop();
+        self.rebuild_view();
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.rebuild_view();
+    }
+
+    // --- Navigation (all operate on view_indices) ---
 
     pub fn nav_up(&mut self) {
         if self.cursor > 0 {
@@ -84,7 +137,7 @@ impl Panel {
     }
 
     pub fn nav_down(&mut self) {
-        if !self.entries.is_empty() && self.cursor + 1 < self.entries.len() {
+        if self.cursor + 1 < self.view_indices.len() {
             self.cursor += 1;
         }
     }
@@ -94,7 +147,7 @@ impl Panel {
     }
 
     pub fn nav_page_down(&mut self, page: usize) {
-        let max = self.entries.len().saturating_sub(1);
+        let max = self.view_indices.len().saturating_sub(1);
         self.cursor = (self.cursor + page).min(max);
     }
 
@@ -103,19 +156,20 @@ impl Panel {
     }
 
     pub fn nav_bottom(&mut self) {
-        self.cursor = self.entries.len().saturating_sub(1);
+        self.cursor = self.view_indices.len().saturating_sub(1);
     }
 
     pub fn nav_enter(&self) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let entry = &self.entries[self.cursor];
-        if entry.name == ".." {
-            self.nav_parent_internal();
-        } else if entry.is_dir {
-            let new_path = self.path.join(&entry.name);
-            Self::load_dir(new_path, self.side, self.action_tx.clone());
+        if let Some(entry) = self.current_entry() {
+            if entry.name == ".." {
+                self.nav_parent_internal();
+            } else if entry.is_dir {
+                Self::load_dir(
+                    self.path.join(&entry.name),
+                    self.side,
+                    self.action_tx.clone(),
+                );
+            }
         }
     }
 
@@ -129,15 +183,17 @@ impl Panel {
         }
     }
 
+    // --- Marking ---
+
     pub fn toggle_mark(&mut self) {
-        if self.entries.is_empty() {
+        let Some(entry) = self.current_entry() else {
             return;
-        }
-        let name = self.entries[self.cursor].name.clone();
-        if name == ".." {
+        };
+        if entry.name == ".." {
             self.nav_down();
             return;
         }
+        let name = entry.name.clone();
         if self.marked.contains(&name) {
             self.marked.remove(&name);
         } else {
@@ -160,14 +216,24 @@ impl Panel {
         }
     }
 
-    /// Returns the paths to operate on: marked files, or cursor file if nothing marked.
+    // --- Queries ---
+
+    pub fn current_entry(&self) -> Option<&EntryInfo> {
+        self.view_indices.get(self.cursor).map(|&i| &self.entries[i])
+    }
+
+    /// Alias for compatibility.
+    pub fn cursor_entry(&self) -> Option<&EntryInfo> {
+        self.current_entry()
+    }
+
     pub fn effective_targets(&self) -> Vec<PathBuf> {
         if !self.marked.is_empty() {
             self.marked
                 .iter()
                 .map(|name| self.path.join(name))
                 .collect()
-        } else if let Some(entry) = self.entries.get(self.cursor) {
+        } else if let Some(entry) = self.current_entry() {
             if entry.name != ".." {
                 vec![self.path.join(&entry.name)]
             } else {
@@ -178,32 +244,20 @@ impl Panel {
         }
     }
 
-    pub fn cursor_entry(&self) -> Option<&EntryInfo> {
-        self.entries.get(self.cursor)
-    }
-
     pub fn marked_summary(&self) -> Option<(usize, u64)> {
         if self.marked.is_empty() {
             return None;
         }
-        let count = self.marked.len();
         let size: u64 = self
             .entries
             .iter()
             .filter(|e| self.marked.contains(&e.name))
             .map(|e| e.size)
             .sum();
-        Some((count, size))
+        Some((self.marked.len(), size))
     }
 
-    fn clamp_cursor(&mut self) {
-        if self.entries.is_empty() {
-            self.cursor = 0;
-            self.offset = 0;
-        } else {
-            self.cursor = self.cursor.min(self.entries.len() - 1);
-        }
-    }
+    // --- Draw ---
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
         let border_style = if self.is_active {
@@ -225,39 +279,62 @@ impl Panel {
             return;
         }
 
-        let [header_area, list_area] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(inner);
+        // Layout: header | [filter bar] | list
+        let has_filter = !self.filter.is_empty();
+        let constraints: Vec<Constraint> = if has_filter {
+            vec![
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ]
+        } else {
+            vec![Constraint::Length(1), Constraint::Min(0)]
+        };
 
-        // Header row
-        let header = Row::new(vec!["Name", "Size", "Modified"])
-            .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
+        let areas = Layout::vertical(constraints).split(inner);
+        let (header_area, filter_area, list_area) = if has_filter {
+            (areas[0], Some(areas[1]), areas[2])
+        } else {
+            (areas[0], None, areas[1])
+        };
+
+        // Header
         let widths = [
             Constraint::Min(20),
             Constraint::Length(8),
             Constraint::Length(10),
         ];
-        let header_table = Table::new(std::iter::once(header), widths);
-        frame.render_widget(header_table, header_area);
+        let header = Row::new(vec!["Name", "Size", "Modified"])
+            .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
+        frame.render_widget(Table::new(std::iter::once(header), widths), header_area);
 
-        // Adjust scroll offset to keep cursor visible.
+        // Filter bar
+        if let Some(farea) = filter_area {
+            let filter_text = format!(" Filter: {}_", self.filter);
+            frame.render_widget(
+                Paragraph::new(filter_text)
+                    .style(Style::default().fg(Color::Black).bg(Color::Yellow)),
+                farea,
+            );
+        }
+
+        // List
         let visible_height = list_area.height as usize;
         if self.cursor < self.offset {
             self.offset = self.cursor;
-        } else if self.cursor >= self.offset + visible_height {
+        } else if self.cursor >= self.offset + visible_height && visible_height > 0 {
             self.offset = self.cursor + 1 - visible_height;
         }
 
         let rows: Vec<Row> = self
-            .entries
+            .view_indices
             .iter()
             .enumerate()
             .skip(self.offset)
             .take(visible_height)
-            .map(|(i, e)| {
-                let is_cursor = i == self.cursor;
+            .map(|(view_pos, &entry_idx)| {
+                let e = &self.entries[entry_idx];
+                let is_cursor = view_pos == self.cursor;
                 let is_marked = self.marked.contains(&e.name);
 
                 let mark = if is_marked { "*" } else { " " };
@@ -266,7 +343,6 @@ impl Panel {
                 } else {
                     format!("{}{}", mark, e.name)
                 };
-
                 let size_str = if e.is_dir {
                     "<DIR>  ".to_string()
                 } else {
@@ -275,11 +351,12 @@ impl Panel {
                 let date_str = format_age(e.modified);
 
                 let row = Row::new(vec![display_name, size_str, date_str]);
-
                 if is_cursor && self.is_active {
                     row.style(Style::default().add_modifier(Modifier::REVERSED))
                 } else if is_cursor {
-                    row.style(Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM))
+                    row.style(
+                        Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM),
+                    )
                 } else if is_marked {
                     row.style(Style::default().fg(Color::Yellow))
                 } else if e.is_dir {
@@ -290,15 +367,15 @@ impl Panel {
             })
             .collect();
 
-        let table = Table::new(rows, widths);
-        frame.render_widget(table, list_area);
+        frame.render_widget(Table::new(rows, widths), list_area);
     }
 }
+
+// --- Async directory loading ---
 
 async fn read_dir_entries(path: &Path) -> color_eyre::Result<Vec<EntryInfo>> {
     let mut entries = Vec::new();
 
-    // Always add ".." unless at filesystem root.
     if path.parent().is_some() {
         entries.push(EntryInfo {
             name: "..".into(),
@@ -342,6 +419,110 @@ async fn read_dir_entries(path: &Path) -> color_eyre::Result<Vec<EntryInfo>> {
     Ok(entries)
 }
 
+// --- File operation helpers ---
+
+pub async fn copy_recursive(src: &Path, dst: &Path) -> color_eyre::Result<()> {
+    if src.is_dir() {
+        tokio::fs::create_dir_all(dst).await?;
+        let mut dir = tokio::fs::read_dir(src).await?;
+        while let Some(entry) = dir.next_entry().await? {
+            let src_child = entry.path();
+            let dst_child = dst.join(entry.file_name());
+            Box::pin(copy_recursive(&src_child, &dst_child)).await?;
+        }
+    } else {
+        if let Some(parent) = dst.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::copy(src, dst).await?;
+    }
+    Ok(())
+}
+
+pub async fn delete_recursive(path: &Path) -> color_eyre::Result<()> {
+    if path.is_dir() {
+        tokio::fs::remove_dir_all(path).await?;
+    } else {
+        tokio::fs::remove_file(path).await?;
+    }
+    Ok(())
+}
+
+pub async fn extract_archive(archive: &Path, dest: &Path) -> color_eyre::Result<()> {
+    use tokio::process::Command;
+    tokio::fs::create_dir_all(dest).await?;
+
+    let name = archive
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    let a = archive.to_string_lossy();
+    let d = dest.to_string_lossy();
+
+    let status = if name.ends_with(".zip") {
+        Command::new("unzip").args([a.as_ref(), "-d", d.as_ref()]).status().await?
+    } else if name.ends_with(".tar.gz")
+        || name.ends_with(".tgz")
+        || name.ends_with(".tar.bz2")
+        || name.ends_with(".tbz2")
+        || name.ends_with(".tar.xz")
+        || name.ends_with(".txz")
+        || name.ends_with(".tar.zst")
+        || name.ends_with(".tar")
+    {
+        Command::new("tar").args(["-xf", a.as_ref(), "-C", d.as_ref()]).status().await?
+    } else if name.ends_with(".7z") {
+        Command::new("7z")
+            .args(["x", a.as_ref(), &format!("-o{}", d)])
+            .status()
+            .await?
+    } else if name.ends_with(".rar") {
+        Command::new("unrar").args(["x", a.as_ref(), d.as_ref()]).status().await?
+    } else {
+        return Err(eyre!("Unsupported archive type: {}", name));
+    };
+
+    if !status.success() {
+        return Err(eyre!(
+            "Extraction failed (exit {})",
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
+}
+
+pub fn file_name_of(p: &Path) -> color_eyre::Result<String> {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| eyre!("path has no file name: {}", p.display()))
+}
+
+pub fn is_archive(name: &str) -> bool {
+    let n = name.to_lowercase();
+    [
+        ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
+        ".tar.zst", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst",
+    ]
+    .iter()
+    .any(|ext| n.ends_with(ext))
+}
+
+#[cfg(unix)]
+pub fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub fn is_executable(_path: &Path) -> bool {
+    false
+}
+
+// --- Formatting helpers ---
+
 fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "K", "M", "G", "T"];
     let mut val = bytes as f64;
@@ -376,37 +557,4 @@ fn format_age(unix_secs: u64) -> String {
     } else {
         format!("{:>6}y ago", elapsed / (86400 * 365))
     }
-}
-
-pub async fn copy_recursive(src: &Path, dst: &Path) -> color_eyre::Result<()> {
-    if src.is_dir() {
-        tokio::fs::create_dir_all(dst).await?;
-        let mut dir = tokio::fs::read_dir(src).await?;
-        while let Some(entry) = dir.next_entry().await? {
-            let src_child = entry.path();
-            let dst_child = dst.join(entry.file_name());
-            Box::pin(copy_recursive(&src_child, &dst_child)).await?;
-        }
-    } else {
-        if let Some(parent) = dst.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::copy(src, dst).await?;
-    }
-    Ok(())
-}
-
-pub async fn delete_recursive(path: &Path) -> color_eyre::Result<()> {
-    if path.is_dir() {
-        tokio::fs::remove_dir_all(path).await?;
-    } else {
-        tokio::fs::remove_file(path).await?;
-    }
-    Ok(())
-}
-
-pub fn file_name_of(p: &Path) -> color_eyre::Result<String> {
-    p.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| eyre!("path has no file name: {}", p.display()))
 }

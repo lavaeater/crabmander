@@ -7,9 +7,12 @@ use tracing::{debug, info};
 use crate::{
     action::{Action, Side},
     components::{
-        dialog::{self, DeferredOp, DialogState},
+        dialog::{self, DeferredOp, DialogState, MenuAction, MenuItem},
         func_bar,
-        panel::{copy_recursive, delete_recursive, file_name_of, Panel},
+        panel::{
+            copy_recursive, delete_recursive, extract_archive, file_name_of, is_archive,
+            is_executable, Panel,
+        },
     },
     config::Config,
     tui::{Event, Tui},
@@ -32,6 +35,8 @@ pub struct App {
     dialog: Option<DialogState>,
     mode: Mode,
     last_error: Option<String>,
+    /// Command to run after suspending the TUI (set by Execute action).
+    pending_command: Option<(String, Vec<String>)>,
     should_quit: bool,
     should_suspend: bool,
     last_tick_key_events: Vec<KeyEvent>,
@@ -58,6 +63,7 @@ impl App {
             dialog: None,
             mode: Mode::Normal,
             last_error: None,
+            pending_command: None,
             should_quit: false,
             should_suspend: false,
             last_tick_key_events: Vec::new(),
@@ -72,7 +78,6 @@ impl App {
             .frame_rate(self.frame_rate);
         tui.enter()?;
 
-        // Kick off async directory loads for both panels.
         self.left.reload();
         self.right.reload();
 
@@ -80,6 +85,19 @@ impl App {
         loop {
             self.handle_events(&mut tui).await?;
             self.handle_actions(&mut tui)?;
+
+            // Run a pending shell command: suspend TUI, exec, resume.
+            if let Some((cmd, args)) = self.pending_command.take() {
+                tui.exit()?;
+                println!("\nRunning: {} {}\n", cmd, args.join(" "));
+                std::process::Command::new(&cmd).args(&args).status().ok();
+                println!("\nPress Enter to continue...");
+                let mut _s = String::new();
+                std::io::stdin().read_line(&mut _s).ok();
+                tui.enter()?;
+                action_tx.send(Action::ClearScreen)?;
+            }
+
             if self.should_suspend {
                 tui.suspend()?;
                 action_tx.send(Action::Resume)?;
@@ -98,12 +116,12 @@ impl App {
         let Some(event) = tui.next_event().await else {
             return Ok(());
         };
-        let action_tx = self.action_tx.clone();
+        let tx = self.action_tx.clone();
         match event {
-            Event::Quit => action_tx.send(Action::Quit)?,
-            Event::Tick => action_tx.send(Action::Tick)?,
-            Event::Render => action_tx.send(Action::Render)?,
-            Event::Resize(x, y) => action_tx.send(Action::Resize(x, y))?,
+            Event::Quit => tx.send(Action::Quit)?,
+            Event::Tick => tx.send(Action::Tick)?,
+            Event::Render => tx.send(Action::Render)?,
+            Event::Resize(x, y) => tx.send(Action::Resize(x, y))?,
             Event::Key(key) => self.handle_key_event(key)?,
             _ => {}
         }
@@ -115,16 +133,26 @@ impl App {
 
         if self.mode == Mode::Dialog {
             match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                KeyCode::Enter => tx.send(Action::DialogConfirm)?,
+                KeyCode::Char('y') | KeyCode::Char('Y')
+                    if matches!(&self.dialog, Some(DialogState::Confirm { .. })) =>
+                {
                     tx.send(Action::DialogConfirm)?;
                 }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                KeyCode::Esc
+                | KeyCode::Char('n')
+                | KeyCode::Char('N')
+                    if matches!(&self.dialog, Some(DialogState::Confirm { .. })) =>
+                {
                     tx.send(Action::DialogCancel)?;
                 }
-                KeyCode::Backspace => {
-                    tx.send(Action::DialogInputBackspace)?;
-                }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Esc => tx.send(Action::DialogCancel)?,
+                KeyCode::Up => tx.send(Action::DialogNavUp)?,
+                KeyCode::Down => tx.send(Action::DialogNavDown)?,
+                KeyCode::Backspace => tx.send(Action::DialogInputBackspace)?,
+                KeyCode::Char(c)
+                    if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
                     tx.send(Action::DialogInputChar(c))?;
                 }
                 _ => {}
@@ -132,20 +160,36 @@ impl App {
             return Ok(());
         }
 
-        // Normal mode: look up in keybindings.
+        // Normal mode: keybinding lookup first.
         let Some(keymap) = self.config.keybindings.0.get(&self.mode) else {
             return Ok(());
         };
         match keymap.get(&vec![key]) {
             Some(action) => {
                 info!("Got action: {action:?}");
+                self.last_tick_key_events.clear();
                 tx.send(action.clone())?;
             }
             _ => {
                 self.last_tick_key_events.push(key);
                 if let Some(action) = keymap.get(&self.last_tick_key_events) {
                     info!("Got action: {action:?}");
+                    self.last_tick_key_events.clear();
                     tx.send(action.clone())?;
+                } else if self.last_tick_key_events.len() == 1 {
+                    // Unbound single key → filter input or Esc to clear filter.
+                    match key.code {
+                        KeyCode::Char(c)
+                            if !key.modifiers.intersects(
+                                KeyModifiers::CONTROL | KeyModifiers::ALT,
+                            ) =>
+                        {
+                            tx.send(Action::FilterChar(c))?;
+                        }
+                        KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
+                        KeyCode::Esc => tx.send(Action::FilterClear)?,
+                        _ => {}
+                    }
                 }
             }
         }
@@ -171,8 +215,9 @@ impl App {
                 }
                 Action::Render => self.render(tui)?,
 
-                Action::Error(msg) => self.last_error = Some(msg),
-                Action::OpError(msg) => self.last_error = Some(msg),
+                Action::Error(msg) | Action::OpError(msg) => {
+                    self.last_error = Some(msg);
+                }
 
                 // Navigation
                 Action::NavUp => self.active_panel_mut().nav_up(),
@@ -190,6 +235,15 @@ impl App {
                 Action::NavEnter => self.active_panel().nav_enter(),
                 Action::NavParent => self.active_panel().nav_parent(),
                 Action::SwitchPanel => self.switch_panel(),
+                Action::SyncPanelDir => self.sync_panel_dir(),
+
+                // Filter
+                Action::FilterChar(c) => {
+                    self.last_error = None;
+                    self.active_panel_mut().push_filter_char(c);
+                }
+                Action::FilterBackspace => self.active_panel_mut().pop_filter_char(),
+                Action::FilterClear => self.active_panel_mut().clear_filter(),
 
                 // Marking
                 Action::ToggleMark => self.active_panel_mut().toggle_mark(),
@@ -200,25 +254,29 @@ impl App {
                 Action::Move => self.open_move_dialog(),
                 Action::Mkdir => self.open_mkdir_dialog(),
                 Action::Delete => self.open_delete_dialog(),
+                Action::ContextMenu => self.open_context_menu(),
 
-                // Async dir load completed
+                // Async dir load
                 Action::DirLoaded { side, path, entries } => {
                     self.get_panel_mut(side).on_dir_loaded(path, entries);
                 }
 
-                // Execute ops (dispatched from dialog confirm)
-                Action::ExecuteDelete(paths) => self.spawn_delete(paths),
+                // Execute ops (from ExecuteCopy/Move/Delete/Mkdir actions — legacy path)
+                Action::ExecuteDelete(paths) => self.do_delete(paths),
                 Action::ExecuteCopy { sources, dest } => {
                     let active = self.active;
-                    self.spawn_copy(sources, dest, active);
+                    self.do_copy(sources, dest, active);
                 }
                 Action::ExecuteMove { sources, dest } => {
                     let active = self.active;
-                    self.spawn_move(sources, dest, active);
+                    self.do_move(sources, dest, active);
                 }
                 Action::ExecuteMkdir { base, name } => {
                     let active = self.active;
-                    self.spawn_mkdir(base, name, active);
+                    self.do_mkdir(base.join(name), active);
+                }
+                Action::ExecuteFile { cmd, args } => {
+                    self.pending_command = Some((cmd, args));
                 }
                 Action::OpCompleted(sides) => {
                     for side in sides {
@@ -229,6 +287,16 @@ impl App {
                 // Dialog
                 Action::DialogConfirm => self.dialog_confirm(),
                 Action::DialogCancel => self.dialog_cancel(),
+                Action::DialogNavUp => {
+                    if let Some(d) = &mut self.dialog {
+                        d.nav_up();
+                    }
+                }
+                Action::DialogNavDown => {
+                    if let Some(d) = &mut self.dialog {
+                        d.nav_down();
+                    }
+                }
                 Action::DialogInputChar(c) => {
                     if let Some(d) = &mut self.dialog {
                         d.push_char(c);
@@ -271,14 +339,11 @@ impl App {
             left.draw(frame, left_area);
             right.draw(frame, right_area);
 
-            // Status bar
             let active_panel = if active == Side::Left { &*left } else { &*right };
             draw_status_bar(frame, status_area, active_panel, last_error.as_deref());
 
-            // Function key bar
             func_bar::draw(frame, func_area);
 
-            // Dialog overlay (drawn last so it's on top)
             if let Some(d) = dialog {
                 dialog::draw(frame, d, area);
             }
@@ -316,10 +381,15 @@ impl App {
         self.right.is_active = self.active == Side::Right;
     }
 
+    fn sync_panel_dir(&mut self) {
+        let path = self.active_panel().path.clone();
+        let other = self.active.other();
+        Panel::load_dir(path, other, self.action_tx.clone());
+    }
+
     fn panel_page_height(&self, tui: &Tui) -> usize {
-        // Panel area height minus borders and header.
         let total = tui.terminal.size().map(|s| s.height).unwrap_or(24);
-        (total.saturating_sub(4) as usize).max(1) // 2 borders + 1 header + 1 status + 1 func
+        (total.saturating_sub(5) as usize).max(1)
     }
 
     // --- Dialog openers ---
@@ -329,12 +399,12 @@ impl App {
         if sources.is_empty() {
             return;
         }
-        let dest = self.get_panel(self.active.other()).path.to_string_lossy().into_owned();
-        let label = if sources.len() == 1 {
-            sources[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-        } else {
-            format!("{} files", sources.len())
-        };
+        let dest = self
+            .get_panel(self.active.other())
+            .path
+            .to_string_lossy()
+            .into_owned();
+        let label = target_label(&sources);
         self.open_dialog(DialogState::input(
             "Copy",
             format!("Copy {} to:", label),
@@ -348,12 +418,12 @@ impl App {
         if sources.is_empty() {
             return;
         }
-        let dest = self.get_panel(self.active.other()).path.to_string_lossy().into_owned();
-        let label = if sources.len() == 1 {
-            sources[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-        } else {
-            format!("{} files", sources.len())
-        };
+        let dest = self
+            .get_panel(self.active.other())
+            .path
+            .to_string_lossy()
+            .into_owned();
+        let label = target_label(&sources);
         self.open_dialog(DialogState::input(
             "Move",
             format!("Move {} to:", label),
@@ -380,12 +450,75 @@ impl App {
         let msg = if sources.len() == 1 {
             format!(
                 "Delete '{}'?",
-                sources[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                sources[0]
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
             )
         } else {
             format!("Delete {} items?", sources.len())
         };
-        self.open_dialog(DialogState::confirm("Delete", msg, DeferredOp::Delete(sources)));
+        self.open_dialog(DialogState::confirm(
+            "Delete",
+            msg,
+            DeferredOp::Delete(sources),
+        ));
+    }
+
+    fn open_context_menu(&mut self) {
+        let Some(entry) = self.active_panel().current_entry() else {
+            return;
+        };
+        if entry.name == ".." {
+            return;
+        }
+
+        let path = self.active_panel().path.join(&entry.name);
+        let panel_dir = self.active_panel().path.clone();
+        let other_dir = self.get_panel(self.active.other()).path.clone();
+        let is_dir = entry.is_dir;
+        let name = entry.name.clone();
+
+        let mut items: Vec<MenuItem> = Vec::new();
+
+        // Always available
+        items.push(MenuItem::new(
+            "Open with OS (xdg-open)",
+            MenuAction::OpenWithOs(path.clone()),
+        ));
+        let code_dir = if is_dir { path.clone() } else { panel_dir.clone() };
+        items.push(MenuItem::new(
+            "Run VS Code here",
+            MenuAction::RunCodeHere(code_dir),
+        ));
+
+        // Archive extraction
+        if !is_dir && is_archive(&name) {
+            items.push(MenuItem::new(
+                "Extract here",
+                MenuAction::ExtractHere {
+                    archive: path.clone(),
+                    dest: panel_dir,
+                },
+            ));
+            items.push(MenuItem::new(
+                format!("Extract to → {}", other_dir.display()),
+                MenuAction::ExtractHere {
+                    archive: path.clone(),
+                    dest: other_dir,
+                },
+            ));
+        }
+
+        // Executable
+        if !is_dir && is_executable(&path) {
+            items.push(MenuItem::new("Execute…", MenuAction::RequestExecute(path)));
+        }
+
+        self.open_dialog(DialogState::context_menu(
+            format!("Actions: {}", name),
+            items,
+        ));
     }
 
     fn open_dialog(&mut self, state: DialogState) {
@@ -393,17 +526,30 @@ impl App {
         self.mode = Mode::Dialog;
     }
 
+    // --- Dialog confirmation ---
+
     fn dialog_confirm(&mut self) {
         let Some(dialog) = self.dialog.take() else {
             return;
         };
-        self.mode = Mode::Normal;
-        self.last_error = None;
-        let tx = self.action_tx.clone();
 
         match dialog {
-            DialogState::Confirm { op, .. } => self.execute_op(op, None, tx),
-            DialogState::Input { value, op, .. } => self.execute_op(op, Some(value), tx),
+            DialogState::Confirm { op, .. } => {
+                self.mode = Mode::Normal;
+                self.last_error = None;
+                self.execute_op(op, None);
+            }
+            DialogState::Input { value, op, .. } => {
+                self.mode = Mode::Normal;
+                self.last_error = None;
+                self.execute_op(op, Some(value));
+            }
+            DialogState::ContextMenu { items, selected, .. } => {
+                self.mode = Mode::Normal;
+                if let Some(item) = items.into_iter().nth(selected) {
+                    self.execute_menu_action(item.action);
+                }
+            }
         }
     }
 
@@ -412,87 +558,85 @@ impl App {
         self.mode = Mode::Normal;
     }
 
-    fn execute_op(
-        &self,
-        op: DeferredOp,
-        value: Option<String>,
-        tx: mpsc::UnboundedSender<Action>,
-    ) {
-        let active = self.active;
-        match op {
-            DeferredOp::Delete(paths) => {
+    fn execute_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::OpenWithOs(path) => {
                 tokio::spawn(async move {
-                    for path in &paths {
-                        if let Err(e) = delete_recursive(path).await {
+                    tokio::process::Command::new("xdg-open")
+                        .arg(path)
+                        .spawn()
+                        .ok();
+                });
+            }
+            MenuAction::RunCodeHere(dir) => {
+                tokio::spawn(async move {
+                    tokio::process::Command::new("code")
+                        .arg(dir)
+                        .spawn()
+                        .ok();
+                });
+            }
+            MenuAction::RequestExecute(path) => {
+                // Open an args dialog; on confirm → ExecuteFile
+                self.open_dialog(DialogState::input(
+                    "Execute",
+                    format!("Arguments for {}:", path.file_name().unwrap_or_default().to_string_lossy()),
+                    "",
+                    DeferredOp::Execute { path },
+                ));
+            }
+            MenuAction::ExtractHere { archive, dest } => {
+                let active = self.active;
+                let tx = self.action_tx.clone();
+                tokio::spawn(async move {
+                    match extract_archive(&archive, &dest).await {
+                        Ok(()) => {
+                            let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+                        }
+                        Err(e) => {
                             let _ = tx.send(Action::OpError(e.to_string()));
-                            return;
                         }
                     }
-                    let _ = tx.send(Action::OpCompleted(vec![active]));
-                });
-            }
-            DeferredOp::Copy { sources } => {
-                let dest: std::path::PathBuf = value.unwrap_or_default().into();
-                tokio::spawn(async move {
-                    for src in &sources {
-                        let name = match file_name_of(src) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                let _ = tx.send(Action::OpError(e.to_string()));
-                                return;
-                            }
-                        };
-                        if let Err(e) = copy_recursive(src, &dest.join(name)).await {
-                            let _ = tx.send(Action::OpError(e.to_string()));
-                            return;
-                        }
-                    }
-                    let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
-                });
-            }
-            DeferredOp::Move { sources } => {
-                let dest: std::path::PathBuf = value.unwrap_or_default().into();
-                tokio::spawn(async move {
-                    for src in &sources {
-                        let name = match file_name_of(src) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                let _ = tx.send(Action::OpError(e.to_string()));
-                                return;
-                            }
-                        };
-                        let dst = dest.join(name);
-                        // Try rename first; fall back to copy+delete for cross-device.
-                        if tokio::fs::rename(src, &dst).await.is_err() {
-                            if let Err(e) = copy_recursive(src, &dst).await {
-                                let _ = tx.send(Action::OpError(e.to_string()));
-                                return;
-                            }
-                            if let Err(e) = delete_recursive(src).await {
-                                let _ = tx.send(Action::OpError(e.to_string()));
-                                return;
-                            }
-                        }
-                    }
-                    let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
-                });
-            }
-            DeferredOp::Mkdir { base } => {
-                let name = value.unwrap_or_default();
-                tokio::spawn(async move {
-                    if let Err(e) = tokio::fs::create_dir(base.join(&name)).await {
-                        let _ = tx.send(Action::OpError(e.to_string()));
-                        return;
-                    }
-                    let _ = tx.send(Action::OpCompleted(vec![active]));
                 });
             }
         }
     }
 
-    // --- Async spawners (legacy path, now inlined into execute_op) ---
+    fn execute_op(&self, op: DeferredOp, value: Option<String>) {
+        let tx = self.action_tx.clone();
+        let active = self.active;
 
-    fn spawn_delete(&self, paths: Vec<std::path::PathBuf>) {
+        match op {
+            DeferredOp::Delete(paths) => self.do_delete(paths),
+
+            DeferredOp::Copy { sources } => {
+                let dest: std::path::PathBuf = value.unwrap_or_default().into();
+                self.do_copy(sources, dest, active);
+            }
+
+            DeferredOp::Move { sources } => {
+                let dest: std::path::PathBuf = value.unwrap_or_default().into();
+                self.do_move(sources, dest, active);
+            }
+
+            DeferredOp::Mkdir { base } => {
+                let name = value.unwrap_or_default();
+                self.do_mkdir(base.join(name), active);
+            }
+
+            DeferredOp::Execute { path } => {
+                let cmd = path.to_string_lossy().into_owned();
+                let args_str = value.unwrap_or_default();
+                let args: Vec<String> =
+                    args_str.split_whitespace().map(String::from).collect();
+                let _ = tx.send(Action::ExecuteFile { cmd, args });
+            }
+        }
+    }
+
+    // --- Async file ops ---
+
+    fn do_delete(&self, paths: Vec<std::path::PathBuf>) {
         let tx = self.action_tx.clone();
         let active = self.active;
         tokio::spawn(async move {
@@ -506,7 +650,7 @@ impl App {
         });
     }
 
-    fn spawn_copy(
+    fn do_copy(
         &self,
         sources: Vec<std::path::PathBuf>,
         dest: std::path::PathBuf,
@@ -531,7 +675,7 @@ impl App {
         });
     }
 
-    fn spawn_move(
+    fn do_move(
         &self,
         sources: Vec<std::path::PathBuf>,
         dest: std::path::PathBuf,
@@ -563,10 +707,10 @@ impl App {
         });
     }
 
-    fn spawn_mkdir(&self, base: std::path::PathBuf, name: String, active: Side) {
+    fn do_mkdir(&self, path: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = tokio::fs::create_dir(base.join(&name)).await {
+            if let Err(e) = tokio::fs::create_dir(&path).await {
                 let _ = tx.send(Action::OpError(e.to_string()));
                 return;
             }
@@ -575,13 +719,17 @@ impl App {
     }
 }
 
+// --- Status bar ---
+
 fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&str>) {
     use ratatui::widgets::Paragraph;
 
     if let Some(err) = error {
-        let para = Paragraph::new(err)
-            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
-        frame.render_widget(para, area);
+        frame.render_widget(
+            Paragraph::new(err)
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            area,
+        );
         return;
     }
 
@@ -595,18 +743,25 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
         String::new()
     };
 
+    let filter_text = if !panel.filter.is_empty() {
+        format!(" [filter: {}]", panel.filter)
+    } else {
+        String::new()
+    };
+
     let right_text = if let Some((count, size)) = panel.marked_summary() {
         format!("{} marked ({} bytes) ", count, size)
     } else {
         String::new()
     };
 
+    let right_w = right_text.len() as u16;
     let [left_area, right_area] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_text.len() as u16)])
-            .areas(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(right_w)]).areas(area);
 
+    let left_full = format!("{}{}", left_text, filter_text);
     frame.render_widget(
-        Paragraph::new(left_text).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(left_full).style(Style::default().add_modifier(Modifier::BOLD)),
         left_area,
     );
     frame.render_widget(
@@ -615,4 +770,17 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
             .style(Style::default().fg(Color::Yellow)),
         right_area,
     );
+}
+
+// --- Helpers ---
+
+fn target_label(sources: &[std::path::PathBuf]) -> String {
+    if sources.len() == 1 {
+        sources[0]
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        format!("{} files", sources.len())
+    }
 }

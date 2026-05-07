@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+
+// --- Deferred operations resolved on dialog confirmation ---
 
 #[derive(Debug, Clone)]
 pub enum DeferredOp {
@@ -11,7 +13,32 @@ pub enum DeferredOp {
     Copy { sources: Vec<PathBuf> },
     Move { sources: Vec<PathBuf> },
     Mkdir { base: PathBuf },
+    Execute { path: PathBuf },
 }
+
+// --- Context menu ---
+
+#[derive(Debug, Clone)]
+pub enum MenuAction {
+    OpenWithOs(PathBuf),
+    RunCodeHere(PathBuf),
+    RequestExecute(PathBuf), // opens an args Input dialog, then runs
+    ExtractHere { archive: PathBuf, dest: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+pub struct MenuItem {
+    pub label: String,
+    pub action: MenuAction,
+}
+
+impl MenuItem {
+    pub fn new(label: impl Into<String>, action: MenuAction) -> Self {
+        Self { label: label.into(), action }
+    }
+}
+
+// --- Dialog state ---
 
 #[derive(Debug, Clone)]
 pub enum DialogState {
@@ -25,6 +52,11 @@ pub enum DialogState {
         prompt: String,
         value: String,
         op: DeferredOp,
+    },
+    ContextMenu {
+        title: String,
+        items: Vec<MenuItem>,
+        selected: usize,
     },
 }
 
@@ -51,6 +83,14 @@ impl DialogState {
         }
     }
 
+    pub fn context_menu(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
+        Self::ContextMenu {
+            title: title.into(),
+            items,
+            selected: 0,
+        }
+    }
+
     pub fn push_char(&mut self, c: char) {
         if let Self::Input { value, .. } = self {
             value.push(c);
@@ -62,19 +102,35 @@ impl DialogState {
             value.pop();
         }
     }
+
+    pub fn nav_up(&mut self) {
+        if let Self::ContextMenu { selected, .. } = self {
+            if *selected > 0 {
+                *selected -= 1;
+            }
+        }
+    }
+
+    pub fn nav_down(&mut self) {
+        if let Self::ContextMenu { selected, items, .. } = self {
+            if *selected + 1 < items.len() {
+                *selected += 1;
+            }
+        }
+    }
 }
 
-pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
-    let popup = centered_rect(62, 10, area);
-    frame.render_widget(Clear, popup);
+// --- Rendering ---
 
+pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
     match dialog {
         DialogState::Confirm { title, message, .. } => {
+            let popup = centered_rect(64, 8, area);
+            frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(format!(" {} ", title));
-
             let text = format!("\n{}\n\n[ Yes / Enter ]   [ No / Esc ]", message);
             let para = Paragraph::new(text)
                 .block(block)
@@ -83,17 +139,13 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             frame.render_widget(para, popup);
         }
 
-        DialogState::Input {
-            title,
-            prompt,
-            value,
-            ..
-        } => {
+        DialogState::Input { title, prompt, value, .. } => {
+            let popup = centered_rect(64, 8, area);
+            frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(format!(" {} ", title));
-
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
 
@@ -106,22 +158,55 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             .areas(inner);
 
             frame.render_widget(
-                Paragraph::new(prompt.as_str()).style(Style::default().add_modifier(Modifier::BOLD)),
+                Paragraph::new(prompt.as_str())
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 prompt_area,
             );
-
-            // Value with a trailing cursor block
-            let display = format!("{}_", value);
             frame.render_widget(
-                Paragraph::new(display).style(Style::default().fg(Color::White)),
+                Paragraph::new(format!("{}_", value))
+                    .style(Style::default().fg(Color::White)),
                 value_area,
             );
-
             frame.render_widget(
                 Paragraph::new("[ Enter ] OK   [ Esc ] Cancel")
                     .alignment(Alignment::Center)
                     .style(Style::default().add_modifier(Modifier::DIM)),
                 hint_area,
+            );
+        }
+
+        DialogState::ContextMenu { title, items, selected } => {
+            let height = (items.len() as u16 + 4).min(area.height.saturating_sub(2));
+            let popup = centered_rect(50, height, area);
+            frame.render_widget(Clear, popup);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green))
+                .title(format!(" {} ", title));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
+            let list_items: Vec<ListItem> = items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let style = if i == *selected {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(format!(" {} ", item.label)).style(style)
+                })
+                .collect();
+
+            let mut state = ListState::default();
+            state.select(Some(*selected));
+
+            frame.render_stateful_widget(
+                List::new(list_items),
+                inner,
+                &mut state,
             );
         }
     }

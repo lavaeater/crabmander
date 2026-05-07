@@ -224,3 +224,22 @@ Directory I/O is synchronous for now (`std::fs::read_dir`). The panel rebuilds i
 6. **`F8 Delete`** — Confirm dialog → `std::fs::remove_file` / `remove_dir_all` → reload.
 7. **`F5 Copy`** — Input dialog (destination) → `std::fs::copy` loop → reload both panels.
 8. **`F6 Move`** — Input dialog (destination) → `std::fs::rename` (fallback copy+delete) → reload both panels.
+
+
+## New features and their order of impl
+
+### Auto-filtering in a pane
+
+If the user starts typing in a pane, the pane filters automatically. Example: user starts typing "down" which would then filter the current directory to show all folders and files that start OR contain down, case-insensitive. Entering a folder (or, in the future, opening a file) clears the filter, as does ESC.
+
+### Push current pane dir to other pane
+
+Perhaps this is good for the key-combination Shift+Tab - it would simply make the other pane cd to the same directory as the currently active pane. Useful when one wants to organize a folder
+
+### Extract / Context-aware commands
+
+So, lets activate the F2 button and make it show a context-menu. This menu will not contain copy, move, rename or delete, but rather file-type specific actions that we could perform. For archive files, such as .rar, .7z, .zip, etc etc, that would mean Extract To -> the other panes directory. We should also probably have some generic file-system opening thing which would just send it to the operating systems normal opening functions. 
+
+Also, one menu item could be "Run Code here" which would simply do a "code . &" so we start a Visual Studio Code instance in the current folder.
+
+If the current file is an executable / executable script, we could also have an "Execute" option - choosing this would also let us specify parameters to send to the script / command.

@@ -15,20 +15,20 @@
       "<pageup>": "NavPageUp",
       "<pagedown>": "NavPageDown",
       "<home>": "NavTop",
-      "<g>": "NavTop",
       "<end>": "NavBottom",
-      "<G>": "NavBottom",
       "<enter>": "NavEnter",
       "<right>": "NavEnter",
       "<backspace>": "NavParent",
       "<left>": "NavParent",
       "<tab>": "SwitchPanel",
+      "<backtab>": "SyncPanelDir",
 
       // Marking
       "<space>": "ToggleMark",
       "<insert>": "ToggleMark",
 
       // Operations
+      "<f2>": "ContextMenu",
       "<f5>": "Copy",
       "<f6>": "Move",
       "<f7>": "Mkdir",

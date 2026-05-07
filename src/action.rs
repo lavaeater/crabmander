@@ -48,6 +48,7 @@ pub enum Action {
     NavEnter,
     NavParent,
     SwitchPanel,
+    SyncPanelDir, // Shift+Tab: sync other panel to active panel's dir
 
     // Marking
     ToggleMark,
@@ -58,6 +59,16 @@ pub enum Action {
     Move,
     Mkdir,
     Delete,
+    ContextMenu, // F2
+
+    // Filter (unbound printable keys in Normal mode)
+    FilterChar(char),
+    FilterBackspace,
+    FilterClear,
+
+    // Dialog navigation (arrow keys while a dialog is open)
+    DialogNavUp,
+    DialogNavDown,
 
     // Async completions (sent from spawned tasks)
     #[strum(to_string = "DirLoaded")]
@@ -83,11 +94,16 @@ pub enum Action {
         base: PathBuf,
         name: String,
     },
+    #[strum(to_string = "ExecuteFile")]
+    ExecuteFile {
+        cmd: String,
+        args: Vec<String>,
+    },
     #[strum(to_string = "OpCompleted")]
     OpCompleted(Vec<Side>),
     OpError(String),
 
-    // Dialog
+    // Dialog lifecycle
     DialogInputChar(char),
     DialogInputBackspace,
     DialogConfirm,
