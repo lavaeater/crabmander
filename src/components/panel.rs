@@ -169,6 +169,14 @@ impl Panel {
                     self.side,
                     self.action_tx.clone(),
                 );
+            } else {
+                let path = self.path.join(&entry.name);
+                tokio::spawn(async move {
+                    tokio::process::Command::new("xdg-open")
+                        .arg(path)
+                        .spawn()
+                        .ok();
+                });
             }
         }
     }
