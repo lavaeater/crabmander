@@ -12,6 +12,10 @@ pub struct Cli {
     /// Frame rate, i.e. number of frames per second
     #[arg(short, long, value_name = "FLOAT", default_value_t = 60.0)]
     pub frame_rate: f64,
+
+    /// Install a .desktop entry for the current user and exit
+    #[arg(long)]
+    pub install_desktop_entry: bool,
 }
 
 const VERSION_MESSAGE: &str = concat!(
