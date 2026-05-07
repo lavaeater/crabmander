@@ -1,10 +1,38 @@
 {
   "keybindings": {
-    "Home": {
-      "<q>": "Quit", // Quit the application
-      "<Ctrl-d>": "Quit", // Another way to quit
-      "<Ctrl-c>": "Quit", // Yet another way to quit
-      "<Ctrl-z>": "Suspend" // Suspend the application
+    "Normal": {
+      // Quit
+      "<q>": "Quit",
+      "<f10>": "Quit",
+      "<Ctrl-c>": "Quit",
+      "<Ctrl-z>": "Suspend",
+
+      // Navigation
+      "<up>": "NavUp",
+      "<k>": "NavUp",
+      "<down>": "NavDown",
+      "<j>": "NavDown",
+      "<pageup>": "NavPageUp",
+      "<pagedown>": "NavPageDown",
+      "<home>": "NavTop",
+      "<g>": "NavTop",
+      "<end>": "NavBottom",
+      "<G>": "NavBottom",
+      "<enter>": "NavEnter",
+      "<right>": "NavEnter",
+      "<backspace>": "NavParent",
+      "<left>": "NavParent",
+      "<tab>": "SwitchPanel",
+
+      // Marking
+      "<space>": "ToggleMark",
+      "<insert>": "ToggleMark",
+
+      // Operations
+      "<f5>": "Copy",
+      "<f6>": "Move",
+      "<f7>": "Mkdir",
+      "<f8>": "Delete",
     },
   }
 }
