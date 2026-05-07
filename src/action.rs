@@ -61,6 +61,12 @@ pub enum Action {
     Delete,
     ContextMenu, // F2
 
+    // Quick CD (F1)
+    QuickCd,
+    QuickCdChar(char),
+    QuickCdBackspace,
+    QuickCdComplete, // Tab — complete selected match into input
+
     // Filter (unbound printable keys in Normal mode)
     FilterChar(char),
     FilterBackspace,

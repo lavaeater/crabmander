@@ -28,6 +28,7 @@
       "<insert>": "ToggleMark",
 
       // Operations
+      "<f1>": "QuickCd",
       "<f2>": "ContextMenu",
       "<f5>": "Copy",
       "<f6>": "Move",

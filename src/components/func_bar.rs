@@ -4,7 +4,8 @@ use ratatui::{
 };
 
 const KEYS: &[(&str, &str, bool)] = &[
-    ("F2", "Menu", false),
+    ("F1", "QuickCD", true),
+    ("F2", "Menu", true),
     ("F3", "View", false),
     ("F4", "Edit", false),
     ("F5", "Copy", true),

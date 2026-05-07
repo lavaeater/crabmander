@@ -132,23 +132,33 @@ impl App {
         let tx = self.action_tx.clone();
 
         if self.mode == Mode::Dialog {
+            let is_qcd = self.dialog.as_ref().map(|d| d.is_quick_cd()).unwrap_or(false);
+            let is_confirm = matches!(&self.dialog, Some(DialogState::Confirm { .. }));
+
             match key.code {
                 KeyCode::Enter => tx.send(Action::DialogConfirm)?,
-                KeyCode::Char('y') | KeyCode::Char('Y')
-                    if matches!(&self.dialog, Some(DialogState::Confirm { .. })) =>
-                {
-                    tx.send(Action::DialogConfirm)?;
-                }
-                KeyCode::Esc
-                | KeyCode::Char('n')
-                | KeyCode::Char('N')
-                    if matches!(&self.dialog, Some(DialogState::Confirm { .. })) =>
-                {
-                    tx.send(Action::DialogCancel)?;
-                }
                 KeyCode::Esc => tx.send(Action::DialogCancel)?,
                 KeyCode::Up => tx.send(Action::DialogNavUp)?,
                 KeyCode::Down => tx.send(Action::DialogNavDown)?,
+
+                // QuickCd-specific
+                KeyCode::Tab if is_qcd => tx.send(Action::QuickCdComplete)?,
+                KeyCode::Backspace if is_qcd => tx.send(Action::QuickCdBackspace)?,
+                KeyCode::Char(c) if is_qcd
+                    && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    tx.send(Action::QuickCdChar(c))?;
+                }
+
+                // Confirm-dialog y/n shortcuts
+                KeyCode::Char('y') | KeyCode::Char('Y') if is_confirm => {
+                    tx.send(Action::DialogConfirm)?;
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') if is_confirm => {
+                    tx.send(Action::DialogCancel)?;
+                }
+
+                // Input dialogs
                 KeyCode::Backspace => tx.send(Action::DialogInputBackspace)?,
                 KeyCode::Char(c)
                     if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -248,6 +258,34 @@ impl App {
                 // Marking
                 Action::ToggleMark => self.active_panel_mut().toggle_mark(),
                 Action::ToggleMarkAll => self.active_panel_mut().toggle_mark_all(),
+
+                // Quick CD
+                Action::QuickCd => self.open_quick_cd_dialog(),
+                Action::QuickCdChar(c) => {
+                    if let Some(DialogState::QuickCd { input, .. }) = &mut self.dialog {
+                        if input.is_empty() && c == '~' {
+                            let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+                            *input = format!("{}/", home);
+                        } else {
+                            input.push(c);
+                        }
+                    }
+                    self.refresh_quick_cd();
+                }
+                Action::QuickCdBackspace => {
+                    if let Some(DialogState::QuickCd { input, .. }) = &mut self.dialog {
+                        input.pop();
+                    }
+                    self.refresh_quick_cd();
+                }
+                Action::QuickCdComplete => {
+                    if let Some(new_input) = self.quick_cd_complete_input() {
+                        if let Some(DialogState::QuickCd { input, .. }) = &mut self.dialog {
+                            *input = new_input;
+                        }
+                        self.refresh_quick_cd();
+                    }
+                }
 
                 // F-key operations
                 Action::Copy => self.open_copy_dialog(),
@@ -550,6 +588,12 @@ impl App {
                     self.execute_menu_action(item.action);
                 }
             }
+            DialogState::QuickCd { input, matches, selected, base_path } => {
+                self.mode = Mode::Normal;
+                let dest = quick_cd_destination(&input, &matches, selected, &base_path);
+                let side = self.active;
+                Panel::load_dir(dest, side, self.action_tx.clone());
+            }
         }
     }
 
@@ -772,7 +816,102 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
     );
 }
 
-// --- Helpers ---
+// --- QuickCd helpers ---
+
+impl App {
+    fn open_quick_cd_dialog(&mut self) {
+        let base_path = self.active_panel().path.clone();
+        let matches = quick_cd_list_dirs(&base_path, "");
+        self.open_dialog(DialogState::QuickCd {
+            input: String::new(),
+            matches,
+            selected: 0,
+            base_path,
+        });
+    }
+
+    fn refresh_quick_cd(&mut self) {
+        if let Some(DialogState::QuickCd { input, matches, selected, base_path }) =
+            &mut self.dialog
+        {
+            let (parent, filter) = quick_cd_parse_input(input, base_path);
+            *matches = quick_cd_list_dirs(&parent, &filter);
+            *selected = 0;
+        }
+    }
+
+    fn quick_cd_complete_input(&self) -> Option<String> {
+        let DialogState::QuickCd { input, matches, selected, .. } = self.dialog.as_ref()? else {
+            return None;
+        };
+        let name = matches.get(*selected)?;
+        // Replace the filter part (after last `/`) with `name/`
+        let prefix_len = input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        Some(format!("{}{}/", &input[..prefix_len], name))
+    }
+}
+
+fn quick_cd_parse_input(input: &str, base: &std::path::Path) -> (std::path::PathBuf, String) {
+    let expanded = quick_cd_expand(input);
+    if let Some(last_slash) = expanded.rfind('/') {
+        let parent_str = &expanded[..=last_slash];
+        let filter = expanded[last_slash + 1..].to_string();
+        let parent = if parent_str.starts_with('/') {
+            std::path::PathBuf::from(parent_str)
+        } else {
+            base.join(parent_str)
+        };
+        (parent, filter)
+    } else {
+        (base.to_path_buf(), expanded)
+    }
+}
+
+fn quick_cd_list_dirs(parent: &std::path::Path, filter: &str) -> Vec<String> {
+    let filter_lower = filter.to_lowercase();
+    let mut dirs: Vec<String> = std::fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| filter.is_empty() || name.to_lowercase().contains(&filter_lower))
+        .collect();
+    dirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    dirs
+}
+
+fn quick_cd_destination(
+    input: &str,
+    matches: &[String],
+    selected: usize,
+    base: &std::path::Path,
+) -> std::path::PathBuf {
+    if !matches.is_empty() {
+        let (parent, _) = quick_cd_parse_input(input, base);
+        parent.join(&matches[selected.min(matches.len() - 1)])
+    } else {
+        // No matches — try to navigate to the raw input.
+        let expanded = quick_cd_expand(input);
+        if expanded.starts_with('/') {
+            std::path::PathBuf::from(expanded)
+        } else {
+            base.join(expanded)
+        }
+    }
+}
+
+fn quick_cd_expand(s: &str) -> String {
+    if s.starts_with('~') {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+        format!("{}{}", home, &s[1..])
+    } else {
+        s.to_string()
+    }
+}
+
+// --- General helpers ---
 
 fn target_label(sources: &[std::path::PathBuf]) -> String {
     if sources.len() == 1 {

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::{
     prelude::*,
@@ -58,6 +58,12 @@ pub enum DialogState {
         items: Vec<MenuItem>,
         selected: usize,
     },
+    QuickCd {
+        input: String,
+        matches: Vec<String>, // sorted dir names in the current parent
+        selected: usize,
+        base_path: PathBuf,   // active panel's path at open time (for relative resolution)
+    },
 }
 
 impl DialogState {
@@ -104,19 +110,34 @@ impl DialogState {
     }
 
     pub fn nav_up(&mut self) {
-        if let Self::ContextMenu { selected, .. } = self {
-            if *selected > 0 {
-                *selected -= 1;
+        match self {
+            Self::ContextMenu { selected, .. } | Self::QuickCd { selected, .. } => {
+                if *selected > 0 {
+                    *selected -= 1;
+                }
             }
+            _ => {}
         }
     }
 
     pub fn nav_down(&mut self) {
-        if let Self::ContextMenu { selected, items, .. } = self {
-            if *selected + 1 < items.len() {
-                *selected += 1;
+        match self {
+            Self::ContextMenu { selected, items, .. } => {
+                if *selected + 1 < items.len() {
+                    *selected += 1;
+                }
             }
+            Self::QuickCd { selected, matches, .. } => {
+                if *selected + 1 < matches.len() {
+                    *selected += 1;
+                }
+            }
+            _ => {}
         }
+    }
+
+    pub fn is_quick_cd(&self) -> bool {
+        matches!(self, Self::QuickCd { .. })
     }
 }
 
@@ -169,6 +190,69 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             );
             frame.render_widget(
                 Paragraph::new("[ Enter ] OK   [ Esc ] Cancel")
+                    .alignment(Alignment::Center)
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                hint_area,
+            );
+        }
+
+        DialogState::QuickCd { input, matches, selected, .. } => {
+            let height = (matches.len() as u16 + 6).clamp(10, 24).min(area.height.saturating_sub(2));
+            let popup = centered_rect(66, height, area);
+            frame.render_widget(Clear, popup);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta))
+                .title(" Quick CD ");
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
+            let [input_area, sep_area, list_area, hint_area] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+
+            // Input line
+            frame.render_widget(
+                Paragraph::new(format!("{}_", input))
+                    .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                input_area,
+            );
+
+            // Separator
+            frame.render_widget(
+                Paragraph::new("─".repeat(inner.width as usize))
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                sep_area,
+            );
+
+            // Match list
+            let list_items: Vec<ListItem> = matches
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let style = if i == *selected {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default().fg(Color::Cyan)
+                    };
+                    ListItem::new(format!(" {}/", name)).style(style)
+                })
+                .collect();
+
+            let mut list_state = ListState::default();
+            if !matches.is_empty() {
+                list_state.select(Some(*selected));
+            }
+            frame.render_stateful_widget(List::new(list_items), list_area, &mut list_state);
+
+            // Hint
+            frame.render_widget(
+                Paragraph::new("↑↓ select   Tab complete   ↵ cd   Esc cancel")
                     .alignment(Alignment::Center)
                     .style(Style::default().add_modifier(Modifier::DIM)),
                 hint_area,
