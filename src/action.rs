@@ -61,7 +61,9 @@ pub enum Action {
     Delete,
     ContextMenu, // F2
     View,        // F3 — open in nano
-    CalcSizes,   // F4 — recursive dir size calculation
+    CalcSizes,    // F4 — recursive dir size calculation
+    CycleSortMode, // F9 — cycle Name → Size → Modified
+    InvertSort,    // Shift+F9 — flip Asc/Desc
 
     // Quick CD (F1)
     QuickCd,

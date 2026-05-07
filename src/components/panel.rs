@@ -13,6 +13,12 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::action::{Action, EntryInfo, Side};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode { Name, Size, Modified }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder { Asc, Desc }
+
 pub struct Panel {
     pub side: Side,
     pub path: PathBuf,
@@ -31,6 +37,8 @@ pub struct Panel {
     pub dir_sizes: HashMap<String, u64>,
     pub sizes_calculating: bool,
     sizes_pending: usize,
+    pub sort_mode: SortMode,
+    pub sort_order: SortOrder,
     action_tx: UnboundedSender<Action>,
 }
 
@@ -50,6 +58,8 @@ impl Panel {
             dir_sizes: HashMap::new(),
             sizes_calculating: false,
             sizes_pending: 0,
+            sort_mode: SortMode::Name,
+            sort_order: SortOrder::Asc,
             action_tx,
         }
     }
@@ -101,18 +111,37 @@ impl Panel {
     }
 
     fn rebuild_view(&mut self) {
-        if self.filter.is_empty() {
-            self.view_indices = (0..self.entries.len()).collect();
-        } else {
-            let f = self.filter.to_lowercase();
-            self.view_indices = self
-                .entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.name == ".." || e.name.to_lowercase().contains(&f))
-                .map(|(i, _)| i)
-                .collect();
+        let f = self.filter.to_lowercase();
+
+        let mut dotdot: Vec<usize> = Vec::new();
+        let mut dirs: Vec<usize> = Vec::new();
+        let mut files: Vec<usize> = Vec::new();
+
+        for (i, e) in self.entries.iter().enumerate() {
+            if !self.filter.is_empty() && e.name != ".." && !e.name.to_lowercase().contains(&f) {
+                continue;
+            }
+            if e.name == ".." {
+                dotdot.push(i);
+            } else if e.is_dir {
+                dirs.push(i);
+            } else {
+                files.push(i);
+            }
         }
+
+        let mode = self.sort_mode;
+        let order = self.sort_order;
+        let entries = &self.entries;
+        let dir_sizes = &self.dir_sizes;
+
+        let mut sort = |group: &mut Vec<usize>| {
+            group.sort_by(|&a, &b| sort_cmp(entries, dir_sizes, a, b, mode, order));
+        };
+        sort(&mut dirs);
+        sort(&mut files);
+
+        self.view_indices = dotdot.into_iter().chain(dirs).chain(files).collect();
         let max = self.view_indices.len().saturating_sub(1);
         self.cursor = self.cursor.min(max);
     }
@@ -281,6 +310,25 @@ impl Panel {
         Some((self.marked.len(), size))
     }
 
+    // --- Sorting ---
+
+    pub fn cycle_sort_mode(&mut self) {
+        self.sort_mode = match self.sort_mode {
+            SortMode::Name => SortMode::Size,
+            SortMode::Size => SortMode::Modified,
+            SortMode::Modified => SortMode::Name,
+        };
+        self.rebuild_view();
+    }
+
+    pub fn invert_sort(&mut self) {
+        self.sort_order = match self.sort_order {
+            SortOrder::Asc => SortOrder::Desc,
+            SortOrder::Desc => SortOrder::Asc,
+        };
+        self.rebuild_view();
+    }
+
     // --- Size calculation ---
 
     pub fn start_size_calc(&mut self) {
@@ -295,6 +343,11 @@ impl Panel {
             .collect();
 
         self.sizes_pending = dirs.len();
+        // Switch to size-descending immediately so known sizes bubble up as they arrive.
+        self.sort_mode = SortMode::Size;
+        self.sort_order = SortOrder::Desc;
+        self.rebuild_view();
+
         if dirs.is_empty() {
             self.sizes_calculating = false;
             return;
@@ -324,6 +377,7 @@ impl Panel {
         if self.sizes_pending == 0 {
             self.sizes_calculating = false;
         }
+        self.rebuild_view(); // re-sort as each size arrives
     }
 
     /// Total known size: all files + all computed dir sizes. Returns (total, is_approximate).
@@ -377,13 +431,17 @@ impl Panel {
             (areas[0], None, areas[1])
         };
 
-        // Header
+        // Header — highlight the active sort column with an arrow.
         let widths = [
             Constraint::Min(20),
             Constraint::Length(8),
             Constraint::Length(10),
         ];
-        let header = Row::new(vec!["Name", "Size", "Modified"])
+        let arrow = if self.sort_order == SortOrder::Asc { "↑" } else { "↓" };
+        let h_name = if self.sort_mode == SortMode::Name { format!("Name{}", arrow) } else { "Name".into() };
+        let h_size = if self.sort_mode == SortMode::Size { format!("Size{}", arrow) } else { "Size".into() };
+        let h_mod  = if self.sort_mode == SortMode::Modified { format!("Date{}", arrow) } else { "Date".into() };
+        let header = Row::new(vec![h_name, h_size, h_mod])
             .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
         frame.render_widget(Table::new(std::iter::once(header), widths), header_area);
 
@@ -611,6 +669,48 @@ pub fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 pub fn is_executable(_path: &Path) -> bool {
     false
+}
+
+// --- Sorting ---
+
+fn sort_cmp(
+    entries: &[EntryInfo],
+    dir_sizes: &HashMap<String, u64>,
+    a: usize,
+    b: usize,
+    mode: SortMode,
+    order: SortOrder,
+) -> std::cmp::Ordering {
+    let ea = &entries[a];
+    let eb = &entries[b];
+
+    let ord = match mode {
+        SortMode::Name => ea.name.to_lowercase().cmp(&eb.name.to_lowercase()),
+
+        SortMode::Size => {
+            let sa = if ea.is_dir { dir_sizes.get(&ea.name).copied() } else { Some(ea.size) };
+            let sb = if eb.is_dir { dir_sizes.get(&eb.name).copied() } else { Some(eb.size) };
+            match (sa, sb) {
+                (Some(a), Some(b)) => {
+                    // Apply order only to known-vs-known comparisons.
+                    let c = a.cmp(&b);
+                    if order == SortOrder::Desc { c.reverse() } else { c }
+                }
+                // Unknown sizes always sink to the bottom regardless of direction.
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => ea.name.to_lowercase().cmp(&eb.name.to_lowercase()),
+            }
+        }
+
+        SortMode::Modified => {
+            let c = ea.modified.cmp(&eb.modified);
+            if order == SortOrder::Desc { c.reverse() } else { c }
+        }
+    };
+
+    // For Name and Modified the order flag is applied here uniformly.
+    if mode == SortMode::Name && order == SortOrder::Desc { ord.reverse() } else { ord }
 }
 
 // --- Recursive size ---

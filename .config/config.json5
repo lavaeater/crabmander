@@ -32,6 +32,8 @@
       "<f2>": "ContextMenu",
       "<f3>": "View",
       "<f4>": "CalcSizes",
+      "<f9>": "CycleSortMode",
+      "<shift-f9>": "InvertSort",
       "<f5>": "Copy",
       "<f6>": "Move",
       "<f7>": "Mkdir",

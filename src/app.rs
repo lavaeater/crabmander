@@ -303,6 +303,8 @@ impl App {
                 Action::Delete => self.open_delete_dialog(),
                 Action::View => self.open_nano_dialog(),
                 Action::CalcSizes => self.active_panel_mut().start_size_calc(),
+                Action::CycleSortMode => self.active_panel_mut().cycle_sort_mode(),
+                Action::InvertSort => self.active_panel_mut().invert_sort(),
                 Action::ContextMenu => self.open_context_menu(),
 
                 // Dir size results (from F4)

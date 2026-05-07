@@ -9,6 +9,7 @@ const KEYS: &[(&str, &str, bool)] = &[
     ("F6", "Move", true),
     ("F7", "MkDir", true),
     ("F8", "Delete", true),
+    ("F9", "Sort", true),
     ("F10", "Quit", true),
 ];
 
