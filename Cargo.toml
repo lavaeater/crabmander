@@ -1,6 +1,6 @@
 [package]
 name = "crabmander"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 description = "A twin-pane TUI file manager written in Rust using Ratatui."
 authors = ["Tommie Nygren <tommie.nygren@gmail.com>"]
