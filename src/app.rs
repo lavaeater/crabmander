@@ -302,7 +302,13 @@ impl App {
                 Action::Mkdir => self.open_mkdir_dialog(),
                 Action::Delete => self.open_delete_dialog(),
                 Action::View => self.open_nano_dialog(),
+                Action::CalcSizes => self.active_panel_mut().start_size_calc(),
                 Action::ContextMenu => self.open_context_menu(),
+
+                // Dir size results (from F4)
+                Action::DirSizeResult { side, panel_path, name, size } => {
+                    self.get_panel_mut(side).on_dir_size_result(&panel_path, name, size);
+                }
 
                 // Async dir load
                 Action::DirLoaded {
@@ -833,7 +839,10 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
     };
 
     let right_text = if let Some((count, size)) = panel.marked_summary() {
-        format!("{} marked ({} bytes) ", count, size)
+        format!("{} marked ({}) ", count, format_status_size(size))
+    } else if let Some((total, approx)) = panel.size_summary() {
+        let prefix = if approx { "~" } else { "" };
+        format!("{}total {} ", prefix, format_status_size(total))
     } else {
         String::new()
     };
@@ -961,6 +970,17 @@ fn quick_cd_expand(s: &str) -> String {
 }
 
 // --- General helpers ---
+
+fn format_status_size(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut val = bytes as f64;
+    let mut unit = 0;
+    while val >= 1000.0 && unit + 1 < UNITS.len() {
+        val /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 { format!("{} B", bytes) } else { format!("{:.1} {}", val, UNITS[unit]) }
+}
 
 fn target_label(sources: &[std::path::PathBuf]) -> String {
     if sources.len() == 1 {

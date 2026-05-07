@@ -61,6 +61,7 @@ pub enum Action {
     Delete,
     ContextMenu, // F2
     View,        // F3 — open in nano
+    CalcSizes,   // F4 — recursive dir size calculation
 
     // Quick CD (F1)
     QuickCd,
@@ -105,6 +106,13 @@ pub enum Action {
     ExecuteFile {
         cmd: String,
         args: Vec<String>,
+    },
+    #[strum(to_string = "DirSizeResult")]
+    DirSizeResult {
+        side: Side,
+        panel_path: PathBuf, // guards against stale results after navigation
+        name: String,
+        size: u64,
     },
     #[strum(to_string = "OpCompleted")]
     OpCompleted(Vec<Side>),

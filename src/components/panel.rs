@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -27,6 +27,10 @@ pub struct Panel {
     pub is_active: bool,
     pub loading: bool,
     pub filter: String,
+    /// Computed recursive sizes for directories, keyed by entry name.
+    pub dir_sizes: HashMap<String, u64>,
+    pub sizes_calculating: bool,
+    sizes_pending: usize,
     action_tx: UnboundedSender<Action>,
 }
 
@@ -43,6 +47,9 @@ impl Panel {
             is_active: false,
             loading: false,
             filter: String::new(),
+            dir_sizes: HashMap::new(),
+            sizes_calculating: false,
+            sizes_pending: 0,
             action_tx,
         }
     }
@@ -75,6 +82,9 @@ impl Panel {
         self.entries = entries;
         if path_changed {
             self.filter.clear();
+            self.dir_sizes.clear();
+            self.sizes_calculating = false;
+            self.sizes_pending = 0;
         }
         self.rebuild_view();
 
@@ -271,6 +281,61 @@ impl Panel {
         Some((self.marked.len(), size))
     }
 
+    // --- Size calculation ---
+
+    pub fn start_size_calc(&mut self) {
+        self.dir_sizes.clear();
+        self.sizes_calculating = true;
+
+        let dirs: Vec<(String, PathBuf)> = self
+            .entries
+            .iter()
+            .filter(|e| e.is_dir && e.name != "..")
+            .map(|e| (e.name.clone(), self.path.join(&e.name)))
+            .collect();
+
+        self.sizes_pending = dirs.len();
+        if dirs.is_empty() {
+            self.sizes_calculating = false;
+            return;
+        }
+
+        let tx = self.action_tx.clone();
+        let side = self.side;
+        let panel_path = self.path.clone();
+
+        for (name, path) in dirs {
+            let tx = tx.clone();
+            let panel_path = panel_path.clone();
+            tokio::spawn(async move {
+                let size = recursive_size(&path).await;
+                let _ = tx.send(Action::DirSizeResult { side, panel_path, name, size });
+            });
+        }
+    }
+
+    pub fn on_dir_size_result(&mut self, panel_path: &Path, name: String, size: u64) {
+        // Ignore stale results from a previous directory.
+        if panel_path != self.path {
+            return;
+        }
+        self.dir_sizes.insert(name, size);
+        self.sizes_pending = self.sizes_pending.saturating_sub(1);
+        if self.sizes_pending == 0 {
+            self.sizes_calculating = false;
+        }
+    }
+
+    /// Total known size: all files + all computed dir sizes. Returns (total, is_approximate).
+    pub fn size_summary(&self) -> Option<(u64, bool)> {
+        if !self.sizes_calculating && self.dir_sizes.is_empty() {
+            return None;
+        }
+        let file_total: u64 = self.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+        let dir_total: u64 = self.dir_sizes.values().sum();
+        Some((file_total + dir_total, self.sizes_calculating))
+    }
+
     // --- Draw ---
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
@@ -357,7 +422,13 @@ impl Panel {
                 } else {
                     format!("{}{}", mark, e.name)
                 };
-                let size_str = if e.is_dir {
+                let size_str = if e.is_dir && e.name != ".." {
+                    match self.dir_sizes.get(&e.name) {
+                        Some(&s) => format_size(s),
+                        None if self.sizes_calculating => "  ···  ".to_string(),
+                        None => "<DIR>  ".to_string(),
+                    }
+                } else if e.is_dir {
                     "<DIR>  ".to_string()
                 } else {
                     format_size(e.size)
@@ -540,6 +611,25 @@ pub fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 pub fn is_executable(_path: &Path) -> bool {
     false
+}
+
+// --- Recursive size ---
+
+async fn recursive_size(path: &Path) -> u64 {
+    let Ok(mut dir) = tokio::fs::read_dir(path).await else {
+        return 0;
+    };
+    let mut total = 0u64;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        if let Ok(meta) = entry.metadata().await {
+            if meta.is_dir() {
+                total += Box::pin(recursive_size(&entry.path())).await;
+            } else {
+                total += meta.len();
+            }
+        }
+    }
+    total
 }
 
 // --- Formatting helpers ---
