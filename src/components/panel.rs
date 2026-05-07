@@ -14,10 +14,17 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::action::{Action, EntryInfo, Side};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortMode { Name, Size, Modified }
+pub enum SortMode {
+    Name,
+    Size,
+    Modified,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortOrder { Asc, Desc }
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
 
 pub struct Panel {
     pub side: Side,
@@ -135,7 +142,7 @@ impl Panel {
         let entries = &self.entries;
         let dir_sizes = &self.dir_sizes;
 
-        let mut sort = |group: &mut Vec<usize>| {
+        let sort = |group: &mut Vec<usize>| {
             group.sort_by(|&a, &b| sort_cmp(entries, dir_sizes, a, b, mode, order));
         };
         sort(&mut dirs);
@@ -362,7 +369,12 @@ impl Panel {
             let panel_path = panel_path.clone();
             tokio::spawn(async move {
                 let size = recursive_size(&path).await;
-                let _ = tx.send(Action::DirSizeResult { side, panel_path, name, size });
+                let _ = tx.send(Action::DirSizeResult {
+                    side,
+                    panel_path,
+                    name,
+                    size,
+                });
             });
         }
     }
@@ -385,7 +397,12 @@ impl Panel {
         if !self.sizes_calculating && self.dir_sizes.is_empty() {
             return None;
         }
-        let file_total: u64 = self.entries.iter().filter(|e| !e.is_dir).map(|e| e.size).sum();
+        let file_total: u64 = self
+            .entries
+            .iter()
+            .filter(|e| !e.is_dir)
+            .map(|e| e.size)
+            .sum();
         let dir_total: u64 = self.dir_sizes.values().sum();
         Some((file_total + dir_total, self.sizes_calculating))
     }
@@ -437,10 +454,26 @@ impl Panel {
             Constraint::Length(8),
             Constraint::Length(10),
         ];
-        let arrow = if self.sort_order == SortOrder::Asc { "↑" } else { "↓" };
-        let h_name = if self.sort_mode == SortMode::Name { format!("Name{}", arrow) } else { "Name".into() };
-        let h_size = if self.sort_mode == SortMode::Size { format!("Size{}", arrow) } else { "Size".into() };
-        let h_mod  = if self.sort_mode == SortMode::Modified { format!("Date{}", arrow) } else { "Date".into() };
+        let arrow = if self.sort_order == SortOrder::Asc {
+            "↑"
+        } else {
+            "↓"
+        };
+        let h_name = if self.sort_mode == SortMode::Name {
+            format!("Name{}", arrow)
+        } else {
+            "Name".into()
+        };
+        let h_size = if self.sort_mode == SortMode::Size {
+            format!("Size{}", arrow)
+        } else {
+            "Size".into()
+        };
+        let h_mod = if self.sort_mode == SortMode::Modified {
+            format!("Date{}", arrow)
+        } else {
+            "Date".into()
+        };
         let header = Row::new(vec![h_name, h_size, h_mod])
             .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
         frame.render_widget(Table::new(std::iter::once(header), widths), header_area);
@@ -688,13 +721,25 @@ fn sort_cmp(
         SortMode::Name => ea.name.to_lowercase().cmp(&eb.name.to_lowercase()),
 
         SortMode::Size => {
-            let sa = if ea.is_dir { dir_sizes.get(&ea.name).copied() } else { Some(ea.size) };
-            let sb = if eb.is_dir { dir_sizes.get(&eb.name).copied() } else { Some(eb.size) };
+            let sa = if ea.is_dir {
+                dir_sizes.get(&ea.name).copied()
+            } else {
+                Some(ea.size)
+            };
+            let sb = if eb.is_dir {
+                dir_sizes.get(&eb.name).copied()
+            } else {
+                Some(eb.size)
+            };
             match (sa, sb) {
                 (Some(a), Some(b)) => {
                     // Apply order only to known-vs-known comparisons.
                     let c = a.cmp(&b);
-                    if order == SortOrder::Desc { c.reverse() } else { c }
+                    if order == SortOrder::Desc {
+                        c.reverse()
+                    } else {
+                        c
+                    }
                 }
                 // Unknown sizes always sink to the bottom regardless of direction.
                 (Some(_), None) => std::cmp::Ordering::Less,
@@ -705,12 +750,20 @@ fn sort_cmp(
 
         SortMode::Modified => {
             let c = ea.modified.cmp(&eb.modified);
-            if order == SortOrder::Desc { c.reverse() } else { c }
+            if order == SortOrder::Desc {
+                c.reverse()
+            } else {
+                c
+            }
         }
     };
 
     // For Name and Modified the order flag is applied here uniformly.
-    if mode == SortMode::Name && order == SortOrder::Desc { ord.reverse() } else { ord }
+    if mode == SortMode::Name && order == SortOrder::Desc {
+        ord.reverse()
+    } else {
+        ord
+    }
 }
 
 // --- Recursive size ---

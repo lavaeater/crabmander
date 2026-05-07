@@ -308,8 +308,14 @@ impl App {
                 Action::ContextMenu => self.open_context_menu(),
 
                 // Dir size results (from F4)
-                Action::DirSizeResult { side, panel_path, name, size } => {
-                    self.get_panel_mut(side).on_dir_size_result(&panel_path, name, size);
+                Action::DirSizeResult {
+                    side,
+                    panel_path,
+                    name,
+                    size,
+                } => {
+                    self.get_panel_mut(side)
+                        .on_dir_size_result(&panel_path, name, size);
                 }
 
                 // Async dir load
@@ -723,7 +729,10 @@ impl App {
                 let filename = value.unwrap_or_default();
                 if !filename.is_empty() {
                     let path = base.join(&filename).to_string_lossy().into_owned();
-                    let _ = tx.send(Action::ExecuteFile { cmd: "nano".into(), args: vec![path] });
+                    let _ = tx.send(Action::ExecuteFile {
+                        cmd: "nano".into(),
+                        args: vec![path],
+                    });
                 }
             }
 
@@ -981,7 +990,11 @@ fn format_status_size(bytes: u64) -> String {
         val /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{} B", bytes) } else { format!("{:.1} {}", val, UNITS[unit]) }
+    if unit == 0 {
+        format!("{} B", bytes)
+    } else {
+        format!("{:.1} {}", val, UNITS[unit])
+    }
 }
 
 fn target_label(sources: &[std::path::PathBuf]) -> String {
