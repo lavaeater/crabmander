@@ -603,6 +603,30 @@ impl App {
             items.push(MenuItem::new("Execute…", MenuAction::RequestExecute(path)));
         }
 
+        // Removable storage mount/unmount
+        for dev in enumerate_removable_devices() {
+            if let Some(mp) = &dev.mountpoint {
+                items.push(MenuItem::new(
+                    format!(
+                        "Unmount {} — {} at {}",
+                        dev.name,
+                        dev.human_label(),
+                        mp
+                    ),
+                    MenuAction::UnmountDevice {
+                        device: dev.name.clone(),
+                    },
+                ));
+            } else if dev.fstype.is_some() {
+                items.push(MenuItem::new(
+                    format!("Mount {} — {}", dev.name, dev.human_label()),
+                    MenuAction::MountDevice {
+                        device: dev.name.clone(),
+                    },
+                ));
+            }
+        }
+
         self.open_dialog(DialogState::context_menu(
             format!("Actions: {}", name),
             items,
@@ -693,6 +717,44 @@ impl App {
                     match extract_archive(&archive, &dest).await {
                         Ok(()) => {
                             let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::OpError(e.to_string()));
+                        }
+                    }
+                });
+            }
+            MenuAction::MountDevice { device } => {
+                let tx = self.action_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::process::Command::new("udisksctl")
+                        .args(["mount", "-b", &format!("/dev/{}", device)])
+                        .output()
+                        .await;
+                    match result {
+                        Ok(out) if out.status.success() => {}
+                        Ok(out) => {
+                            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                            let _ = tx.send(Action::OpError(msg));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Action::OpError(e.to_string()));
+                        }
+                    }
+                });
+            }
+            MenuAction::UnmountDevice { device } => {
+                let tx = self.action_tx.clone();
+                tokio::spawn(async move {
+                    let result = tokio::process::Command::new("udisksctl")
+                        .args(["unmount", "-b", &format!("/dev/{}", device)])
+                        .output()
+                        .await;
+                    match result {
+                        Ok(out) if out.status.success() => {}
+                        Ok(out) => {
+                            let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                            let _ = tx.send(Action::OpError(msg));
                         }
                         Err(e) => {
                             let _ = tx.send(Action::OpError(e.to_string()));
@@ -994,6 +1056,104 @@ fn format_status_size(bytes: u64) -> String {
         format!("{} B", bytes)
     } else {
         format!("{:.1} {}", val, UNITS[unit])
+    }
+}
+
+// --- Removable device enumeration via lsblk ---
+
+struct RemovableDev {
+    name: String,
+    size: Option<String>,
+    fstype: Option<String>,
+    label: Option<String>,
+    model: Option<String>,
+    mountpoint: Option<String>,
+}
+
+impl RemovableDev {
+    fn human_label(&self) -> String {
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(s) = &self.size {
+            parts.push(s.as_str());
+        }
+        if let Some(fs) = &self.fstype {
+            parts.push(fs.as_str());
+        }
+        if let Some(lbl) = &self.label {
+            parts.push(lbl.as_str());
+        }
+        if let Some(model) = &self.model {
+            parts.push(model.as_str());
+        }
+        if parts.is_empty() {
+            self.name.clone()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+fn enumerate_removable_devices() -> Vec<RemovableDev> {
+    let Ok(out) = std::process::Command::new("lsblk")
+        .args([
+            "-J",
+            "-o",
+            "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,HOTPLUG,TYPE",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    if let Some(devs) = json["blockdevices"].as_array() {
+        for dev in devs {
+            collect_removable(dev, &mut result, dev["model"].as_str().map(str::trim));
+        }
+    }
+    result
+}
+
+fn collect_removable<'a>(
+    node: &'a serde_json::Value,
+    out: &mut Vec<RemovableDev>,
+    parent_model: Option<&'a str>,
+) {
+    let hotplug = node["hotplug"].as_bool().unwrap_or(false)
+        || node["hotplug"].as_str().map(|s| s == "1").unwrap_or(false);
+    let kind = node["type"].as_str().unwrap_or("");
+    let model = node["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or(parent_model)
+        .map(str::to_owned);
+
+    if hotplug && (kind == "part" || kind == "disk") {
+        let fstype = node["fstype"].as_str().filter(|s| !s.is_empty()).map(String::from);
+        // Only include partitions (or bare disks) that have a filesystem
+        if fstype.is_some() || kind == "part" {
+            out.push(RemovableDev {
+                name: node["name"].as_str().unwrap_or("").to_owned(),
+                size: node["size"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                fstype,
+                label: node["label"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                model,
+                mountpoint: node["mountpoint"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+            });
+            return; // don't recurse into children of a partition
+        }
+    }
+
+    if let Some(children) = node["children"].as_array() {
+        for child in children {
+            collect_removable(child, out, model.as_deref().or(parent_model));
+        }
     }
 }
 

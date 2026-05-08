@@ -25,6 +25,8 @@ pub enum MenuAction {
     RunCodeHere(PathBuf),
     RequestExecute(PathBuf), // opens an args Input dialog, then runs
     ExtractHere { archive: PathBuf, dest: PathBuf },
+    MountDevice { device: String },
+    UnmountDevice { device: String },
 }
 
 #[derive(Debug, Clone)]
