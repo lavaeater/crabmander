@@ -841,7 +841,12 @@ impl App {
             DeferredOp::ChownFiles { paths, reload_sides } => {
                 let new_owner = value.unwrap_or_default();
                 if !new_owner.is_empty() {
-                    let mut args = vec!["chown".into(), new_owner];
+                    let recursive = paths.iter().any(|p| p.is_dir());
+                    let mut args: Vec<String> = vec!["chown".into()];
+                    if recursive {
+                        args.push("-R".into());
+                    }
+                    args.push(new_owner);
                     args.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
                     let _ = tx.send(Action::ExecuteFile {
                         cmd: "sudo".into(),
