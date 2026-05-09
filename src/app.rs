@@ -36,7 +36,8 @@ pub struct App {
     mode: Mode,
     last_error: Option<String>,
     /// Command to run after suspending the TUI (set by Execute action).
-    pending_command: Option<(String, Vec<String>)>,
+    /// Tuple: (cmd, args, sides_to_reload_after).
+    pending_command: Option<(String, Vec<String>, Vec<Side>)>,
     should_quit: bool,
     should_suspend: bool,
     last_tick_key_events: Vec<KeyEvent>,
@@ -63,7 +64,7 @@ impl App {
             dialog: None,
             mode: Mode::Normal,
             last_error: None,
-            pending_command: None,
+            pending_command: None::<(String, Vec<String>, Vec<Side>)>,
             should_quit: false,
             should_suspend: false,
             last_tick_key_events: Vec::new(),
@@ -87,7 +88,7 @@ impl App {
             self.handle_actions(&mut tui)?;
 
             // Run a pending shell command: suspend TUI, exec, resume.
-            if let Some((cmd, args)) = self.pending_command.take() {
+            if let Some((cmd, args, reload)) = self.pending_command.take() {
                 tui.exit()?;
                 println!("\nRunning: {} {}\n", cmd, args.join(" "));
                 std::process::Command::new(&cmd).args(&args).status().ok();
@@ -96,6 +97,9 @@ impl App {
                 std::io::stdin().read_line(&mut _s).ok();
                 tui.enter()?;
                 action_tx.send(Action::ClearScreen)?;
+                for side in reload {
+                    self.get_panel(side).reload();
+                }
             }
 
             if self.should_suspend {
@@ -341,8 +345,8 @@ impl App {
                     let active = self.active;
                     self.do_mkdir(base.join(name), active);
                 }
-                Action::ExecuteFile { cmd, args } => {
-                    self.pending_command = Some((cmd, args));
+                Action::ExecuteFile { cmd, args, reload } => {
+                    self.pending_command = Some((cmd, args, reload));
                 }
                 Action::OpCompleted(sides) => {
                     for side in sides {
@@ -600,7 +604,22 @@ impl App {
 
         // Executable
         if !is_dir && is_executable(&path) {
-            items.push(MenuItem::new("Execute…", MenuAction::RequestExecute(path)));
+            items.push(MenuItem::new("Execute…", MenuAction::RequestExecute(path.clone())));
+        }
+
+        // Chown — always available; operates on marked files or cursor file.
+        {
+            let targets = self.active_panel().effective_targets();
+            let current_owner = self
+                .active_panel()
+                .current_entry()
+                .map(|e| e.owner.clone())
+                .unwrap_or_default();
+            let reload_sides = vec![self.active];
+            items.push(MenuItem::new(
+                format!("Change owner… (now: {})", current_owner),
+                MenuAction::Chown { paths: targets, current_owner, reload_sides },
+            ));
         }
 
         // Removable storage mount/unmount
@@ -762,6 +781,19 @@ impl App {
                     }
                 });
             }
+
+            MenuAction::Chown { paths, current_owner, reload_sides } => {
+                self.open_dialog(DialogState::input(
+                    "Change Owner",
+                    format!(
+                        "New owner for {} item(s)\n(current: {})\nFormat: user  or  user:group",
+                        paths.len(),
+                        current_owner
+                    ),
+                    current_owner,
+                    DeferredOp::ChownFiles { paths, reload_sides },
+                ));
+            }
         }
     }
 
@@ -794,6 +826,7 @@ impl App {
                     let _ = tx.send(Action::ExecuteFile {
                         cmd: "nano".into(),
                         args: vec![path],
+                        reload: vec![],
                     });
                 }
             }
@@ -802,7 +835,20 @@ impl App {
                 let cmd = path.to_string_lossy().into_owned();
                 let args_str = value.unwrap_or_default();
                 let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
-                let _ = tx.send(Action::ExecuteFile { cmd, args });
+                let _ = tx.send(Action::ExecuteFile { cmd, args, reload: vec![] });
+            }
+
+            DeferredOp::ChownFiles { paths, reload_sides } => {
+                let new_owner = value.unwrap_or_default();
+                if !new_owner.is_empty() {
+                    let mut args = vec!["chown".into(), new_owner];
+                    args.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
+                    let _ = tx.send(Action::ExecuteFile {
+                        cmd: "sudo".into(),
+                        args,
+                        reload: reload_sides,
+                    });
+                }
             }
         }
     }

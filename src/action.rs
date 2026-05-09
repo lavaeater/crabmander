@@ -22,8 +22,13 @@ impl Side {
 pub struct EntryInfo {
     pub name: String,
     pub is_dir: bool,
+    pub is_symlink: bool,
     pub size: u64,
     pub modified: u64, // unix seconds
+    /// Hard link count. > 1 means multiple directory entries share this inode.
+    pub nlink: u32,
+    /// Owner username (empty for non-Unix or unresolvable UIDs).
+    pub owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Display, Serialize, Deserialize)]
@@ -108,6 +113,8 @@ pub enum Action {
     ExecuteFile {
         cmd: String,
         args: Vec<String>,
+        /// Panels to reload after the command exits.
+        reload: Vec<Side>,
     },
     #[strum(to_string = "DirSizeResult")]
     DirSizeResult {

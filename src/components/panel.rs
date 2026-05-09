@@ -450,31 +450,16 @@ impl Panel {
 
         // Header — highlight the active sort column with an arrow.
         let widths = [
-            Constraint::Min(20),
+            Constraint::Min(14),
+            Constraint::Length(7),
             Constraint::Length(8),
-            Constraint::Length(10),
+            Constraint::Length(9),
         ];
-        let arrow = if self.sort_order == SortOrder::Asc {
-            "↑"
-        } else {
-            "↓"
-        };
-        let h_name = if self.sort_mode == SortMode::Name {
-            format!("Name{}", arrow)
-        } else {
-            "Name".into()
-        };
-        let h_size = if self.sort_mode == SortMode::Size {
-            format!("Size{}", arrow)
-        } else {
-            "Size".into()
-        };
-        let h_mod = if self.sort_mode == SortMode::Modified {
-            format!("Date{}", arrow)
-        } else {
-            "Date".into()
-        };
-        let header = Row::new(vec![h_name, h_size, h_mod])
+        let arrow = if self.sort_order == SortOrder::Asc { "↑" } else { "↓" };
+        let h_name = if self.sort_mode == SortMode::Name { format!("Name{}", arrow) } else { "Name".into() };
+        let h_size = if self.sort_mode == SortMode::Size { format!("Size{}", arrow) } else { "Size".into() };
+        let h_mod  = if self.sort_mode == SortMode::Modified { format!("Date{}", arrow) } else { "Date".into() };
+        let header = Row::new(vec![h_name, h_size, h_mod, "Owner".into()])
             .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
         frame.render_widget(Table::new(std::iter::once(header), widths), header_area);
 
@@ -510,6 +495,8 @@ impl Panel {
                 let mark = if is_marked { "*" } else { " " };
                 let display_name = if e.is_dir && e.name != ".." {
                     format!("{}{}/", mark, e.name)
+                } else if e.is_symlink {
+                    format!("{}{}@", mark, e.name) // @ suffix: classic ls -F convention
                 } else {
                     format!("{}{}", mark, e.name)
                 };
@@ -526,17 +513,27 @@ impl Panel {
                 };
                 let date_str = format_age(e.modified);
 
-                let row = Row::new(vec![display_name, size_str, date_str]);
-                if is_cursor && self.is_active {
-                    row.style(Style::default().add_modifier(Modifier::REVERSED))
-                } else if is_cursor {
-                    row.style(Style::default().add_modifier(Modifier::REVERSED | Modifier::DIM))
-                } else if is_marked {
-                    row.style(Style::default().fg(Color::Yellow))
+                let owner_str = e.owner.clone();
+                let row = Row::new(vec![display_name, size_str, date_str, owner_str]);
+
+                let base = if is_marked {
+                    Style::default().fg(Color::Yellow)
                 } else if e.is_dir {
-                    row.style(Style::default().fg(Color::Cyan))
+                    Style::default().fg(Color::Cyan)
+                } else if e.is_symlink {
+                    Style::default().fg(Color::Magenta)      // symlink → magenta
+                } else if e.nlink > 1 {
+                    Style::default().fg(Color::Green)        // hard-linked → green
                 } else {
-                    row.style(Style::default())
+                    Style::default()
+                };
+
+                if is_cursor && self.is_active {
+                    row.style(base.add_modifier(Modifier::REVERSED))
+                } else if is_cursor {
+                    row.style(base.add_modifier(Modifier::REVERSED | Modifier::DIM))
+                } else {
+                    row.style(base)
                 }
             })
             .collect();
@@ -554,13 +551,19 @@ async fn read_dir_entries(path: &Path) -> color_eyre::Result<Vec<EntryInfo>> {
         entries.push(EntryInfo {
             name: "..".into(),
             is_dir: true,
+            is_symlink: false,
             size: 0,
             modified: 0,
+            nlink: 1,
+            owner: String::new(),
         });
     }
 
     let mut dir = tokio::fs::read_dir(path).await?;
     while let Some(entry) = dir.next_entry().await? {
+        // file_type() does NOT follow symlinks — tells us if the entry itself is a symlink.
+        let is_symlink = entry.file_type().await?.is_symlink();
+        // metadata() follows symlinks — gives us size, is_dir, modified of the target.
         let meta = entry.metadata().await?;
         let modified = meta
             .modified()
@@ -568,11 +571,23 @@ async fn read_dir_entries(path: &Path) -> color_eyre::Result<Vec<EntryInfo>> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
+
+        #[cfg(unix)]
+        let (nlink, owner) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.nlink() as u32, uid_to_name(meta.uid()))
+        };
+        #[cfg(not(unix))]
+        let (nlink, owner) = (1u32, String::new());
+
         entries.push(EntryInfo {
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: meta.is_dir(),
+            is_symlink,
             size: if meta.is_dir() { 0 } else { meta.len() },
             modified,
+            nlink,
+            owner,
         });
     }
 
@@ -702,6 +717,30 @@ pub fn is_executable(path: &Path) -> bool {
 #[cfg(not(unix))]
 pub fn is_executable(_path: &Path) -> bool {
     false
+}
+
+// --- Owner lookup ---
+
+#[cfg(unix)]
+fn uid_to_name(uid: u32) -> String {
+    use std::ffi::CStr;
+    use std::mem;
+    let mut pwd: libc::passwd = unsafe { mem::zeroed() };
+    let mut buf = vec![0u8; 512];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let ret = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if ret != 0 || result.is_null() {
+        return uid.to_string();
+    }
+    unsafe { CStr::from_ptr((*result).pw_name).to_string_lossy().into_owned() }
 }
 
 // --- Sorting ---

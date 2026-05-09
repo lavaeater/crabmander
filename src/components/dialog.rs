@@ -15,6 +15,7 @@ pub enum DeferredOp {
     Mkdir { base: PathBuf },
     Execute { path: PathBuf },
     OpenInNano { base: PathBuf },
+    ChownFiles { paths: Vec<PathBuf>, reload_sides: Vec<crate::action::Side> },
 }
 
 // --- Context menu ---
@@ -27,6 +28,7 @@ pub enum MenuAction {
     ExtractHere { archive: PathBuf, dest: PathBuf },
     MountDevice { device: String },
     UnmountDevice { device: String },
+    Chown { paths: Vec<PathBuf>, current_owner: String, reload_sides: Vec<crate::action::Side> },
 }
 
 #[derive(Debug, Clone)]
