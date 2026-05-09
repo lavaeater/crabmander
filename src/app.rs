@@ -35,6 +35,9 @@ pub struct App {
     dialog: Option<DialogState>,
     mode: Mode,
     last_error: Option<String>,
+    /// Session-wide cache of recursively-computed directory sizes.
+    /// Invalidated on any mutating file operation.
+    dir_size_cache: std::collections::HashMap<std::path::PathBuf, u64>,
     /// Command to run after suspending the TUI (set by Execute action).
     /// Tuple: (cmd, args, sides_to_reload_after).
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
@@ -64,6 +67,7 @@ impl App {
             dialog: None,
             mode: Mode::Normal,
             last_error: None,
+            dir_size_cache: std::collections::HashMap::new(),
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
             should_quit: false,
             should_suspend: false,
@@ -306,18 +310,30 @@ impl App {
                 Action::Mkdir => self.open_mkdir_dialog(),
                 Action::Delete => self.open_delete_dialog(),
                 Action::View => self.open_nano_dialog(),
-                Action::CalcSizes => self.active_panel_mut().start_size_calc(),
+                Action::CalcSizes => {
+                    // Collect relevant cache entries (direct children of this panel's path)
+                    // into a temporary map to avoid a simultaneous borrow on self.
+                    let panel_path = self.active_panel().path.clone();
+                    let cache: std::collections::HashMap<_, _> = self
+                        .dir_size_cache
+                        .iter()
+                        .filter(|(p, _)| p.parent() == Some(panel_path.as_path()))
+                        .map(|(p, &s)| (p.clone(), s))
+                        .collect();
+                    self.active_panel_mut().start_size_calc(&cache);
+                }
                 Action::CycleSortMode => self.active_panel_mut().cycle_sort_mode(),
                 Action::InvertSort => self.active_panel_mut().invert_sort(),
                 Action::ContextMenu => self.open_context_menu(),
 
-                // Dir size results (from F4)
+                // Dir size results (from F4) — write to session cache then update panel.
                 Action::DirSizeResult {
                     side,
                     panel_path,
                     name,
                     size,
                 } => {
+                    self.dir_size_cache.insert(panel_path.join(&name), size);
                     self.get_panel_mut(side)
                         .on_dir_size_result(&panel_path, name, size);
                 }
@@ -349,6 +365,7 @@ impl App {
                     self.pending_command = Some((cmd, args, reload));
                 }
                 Action::OpCompleted(sides) => {
+                    self.dir_size_cache.clear(); // sizes are stale after any mutation
                     for side in sides {
                         self.get_panel(side).reload();
                     }

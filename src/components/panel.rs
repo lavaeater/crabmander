@@ -338,9 +338,13 @@ impl Panel {
 
     // --- Size calculation ---
 
-    pub fn start_size_calc(&mut self) {
+    /// `cache` maps absolute directory paths to pre-computed recursive sizes.
+    /// Cache hits are applied immediately; misses are computed asynchronously.
+    pub fn start_size_calc(&mut self, cache: &HashMap<PathBuf, u64>) {
         self.dir_sizes.clear();
         self.sizes_calculating = true;
+        self.sort_mode = SortMode::Size;
+        self.sort_order = SortOrder::Desc;
 
         let dirs: Vec<(String, PathBuf)> = self
             .entries
@@ -349,13 +353,20 @@ impl Panel {
             .map(|e| (e.name.clone(), self.path.join(&e.name)))
             .collect();
 
-        self.sizes_pending = dirs.len();
-        // Switch to size-descending immediately so known sizes bubble up as they arrive.
-        self.sort_mode = SortMode::Size;
-        self.sort_order = SortOrder::Desc;
+        // Apply cache hits immediately; queue misses for async computation.
+        let mut to_compute: Vec<(String, PathBuf)> = Vec::new();
+        for (name, path) in dirs {
+            if let Some(&cached) = cache.get(&path) {
+                self.dir_sizes.insert(name, cached);
+            } else {
+                to_compute.push((name, path));
+            }
+        }
+
+        self.sizes_pending = to_compute.len();
         self.rebuild_view();
 
-        if dirs.is_empty() {
+        if to_compute.is_empty() {
             self.sizes_calculating = false;
             return;
         }
@@ -364,17 +375,12 @@ impl Panel {
         let side = self.side;
         let panel_path = self.path.clone();
 
-        for (name, path) in dirs {
+        for (name, path) in to_compute {
             let tx = tx.clone();
             let panel_path = panel_path.clone();
             tokio::spawn(async move {
                 let size = recursive_size(&path).await;
-                let _ = tx.send(Action::DirSizeResult {
-                    side,
-                    panel_path,
-                    name,
-                    size,
-                });
+                let _ = tx.send(Action::DirSizeResult { side, panel_path, name, size });
             });
         }
     }
