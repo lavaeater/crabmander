@@ -245,6 +245,10 @@ impl App {
                 Action::Error(msg) | Action::OpError(msg) => {
                     self.last_error = Some(msg);
                 }
+                Action::OpErrors(errors) => {
+                    let title = format!("{} error(s)", errors.len());
+                    self.open_dialog(DialogState::error_list(title, errors));
+                }
 
                 // Navigation
                 Action::NavUp => self.active_panel_mut().nav_up(),
@@ -711,6 +715,9 @@ impl App {
                 let side = self.active;
                 Panel::load_dir(dest, side, self.action_tx.clone());
             }
+            DialogState::ErrorList { .. } => {
+                self.mode = Mode::Normal;
+            }
         }
     }
 
@@ -894,47 +901,63 @@ impl App {
     fn do_copy(&self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
+            let mut errors: Vec<String> = Vec::new();
+            let mut succeeded = 0usize;
             for src in &sources {
                 let name = match file_name_of(src) {
                     Ok(n) => n,
                     Err(e) => {
-                        let _ = tx.send(Action::OpError(e.to_string()));
-                        return;
+                        errors.push(format!("{}: {}", src.display(), e));
+                        continue;
                     }
                 };
-                if let Err(e) = copy_recursive(src, &dest.join(name)).await {
-                    let _ = tx.send(Action::OpError(e.to_string()));
-                    return;
+                if let Err(e) = copy_recursive(src, &dest.join(&name)).await {
+                    errors.push(format!("{}: {}", src.display(), e));
+                } else {
+                    succeeded += 1;
                 }
             }
-            let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+            if succeeded > 0 {
+                let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+            }
+            if !errors.is_empty() {
+                let _ = tx.send(Action::OpErrors(errors));
+            }
         });
     }
 
     fn do_move(&self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
+            let mut errors: Vec<String> = Vec::new();
+            let mut succeeded = 0usize;
             for src in &sources {
                 let name = match file_name_of(src) {
                     Ok(n) => n,
                     Err(e) => {
-                        let _ = tx.send(Action::OpError(e.to_string()));
-                        return;
+                        errors.push(format!("{}: {}", src.display(), e));
+                        continue;
                     }
                 };
-                let dest_full_path = dest.join(name);
-                if tokio::fs::rename(src, &dest_full_path).await.is_err() {
-                    if let Err(e) = copy_recursive(src, &dest_full_path).await {
-                        let _ = tx.send(Action::OpError(e.to_string()));
-                        return;
-                    }
-                    if let Err(e) = delete_recursive(src).await {
-                        let _ = tx.send(Action::OpError(e.to_string()));
-                        return;
+                let dest_full_path = dest.join(&name);
+                match tokio::fs::rename(src, &dest_full_path).await {
+                    Ok(()) => succeeded += 1,
+                    Err(e) => {
+                        let detail = if e.raw_os_error() == Some(libc::EXDEV) {
+                            format!("{}: cannot move across filesystems (use Copy then Delete)", src.display())
+                        } else {
+                            format!("{}: {}", src.display(), e)
+                        };
+                        errors.push(detail);
                     }
                 }
             }
-            let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+            if succeeded > 0 {
+                let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+            }
+            if !errors.is_empty() {
+                let _ = tx.send(Action::OpErrors(errors));
+            }
         });
     }
 

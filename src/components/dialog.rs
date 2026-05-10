@@ -72,6 +72,11 @@ pub enum DialogState {
         selected: usize,
         base_path: PathBuf, // active panel's path at open time (for relative resolution)
     },
+    ErrorList {
+        title: String,
+        errors: Vec<String>,
+        scroll: usize,
+    },
 }
 
 impl DialogState {
@@ -105,6 +110,14 @@ impl DialogState {
         }
     }
 
+    pub fn error_list(title: impl Into<String>, errors: Vec<String>) -> Self {
+        Self::ErrorList {
+            title: title.into(),
+            errors,
+            scroll: 0,
+        }
+    }
+
     pub fn push_char(&mut self, c: char) {
         if let Self::Input { value, .. } = self {
             value.push(c);
@@ -124,6 +137,9 @@ impl DialogState {
             {
                 *selected -= 1;
             }
+            Self::ErrorList { scroll, .. } if *scroll > 0 => {
+                *scroll -= 1;
+            }
             _ => {}
         }
     }
@@ -139,6 +155,11 @@ impl DialogState {
                 selected, matches, ..
             } if *selected + 1 < matches.len() => {
                 *selected += 1;
+            }
+            Self::ErrorList {
+                scroll, errors, ..
+            } if *scroll + 1 < errors.len() => {
+                *scroll += 1;
             }
             _ => {}
         }
@@ -314,6 +335,54 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             state.select(Some(*selected));
 
             frame.render_stateful_widget(List::new(list_items), inner, &mut state);
+        }
+
+        DialogState::ErrorList {
+            title,
+            errors,
+            scroll,
+        } => {
+            let visible_lines = 10u16;
+            let height = (visible_lines + 4).min(area.height.saturating_sub(2));
+            let popup = centered_rect(72, height, area);
+            frame.render_widget(Clear, popup);
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .title(format!(" {} ", title));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
+            let [list_area, hint_area] = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .areas(inner);
+
+            let list_items: Vec<ListItem> = errors
+                .iter()
+                .skip(*scroll)
+                .take(list_area.height as usize)
+                .map(|msg| {
+                    ListItem::new(format!(" {}", msg))
+                        .style(Style::default().fg(Color::LightRed))
+                })
+                .collect();
+
+            frame.render_widget(List::new(list_items), list_area);
+
+            let scroll_hint = if errors.len() > list_area.height as usize {
+                format!("↑↓ scroll ({}/{})   ", *scroll + 1, errors.len())
+            } else {
+                String::new()
+            };
+            frame.render_widget(
+                Paragraph::new(format!("{}[ Enter / Esc ] Close", scroll_hint))
+                    .alignment(Alignment::Center)
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                hint_area,
+            );
         }
     }
 }

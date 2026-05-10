@@ -126,6 +126,8 @@ pub enum Action {
     #[strum(to_string = "OpCompleted")]
     OpCompleted(Vec<Side>),
     OpError(String),
+    #[strum(to_string = "OpErrors")]
+    OpErrors(Vec<String>),
 
     // Dialog lifecycle
     DialogInputChar(char),
