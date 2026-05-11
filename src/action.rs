@@ -123,6 +123,13 @@ pub enum Action {
         name: String,
         size: u64,
     },
+    #[strum(to_string = "GitInfoLoaded")]
+    GitInfoLoaded {
+        side: Side,
+        path: PathBuf,
+        branch: Option<String>, // None = not a git repo
+        is_dirty: bool,
+    },
     #[strum(to_string = "OpCompleted")]
     OpCompleted(Vec<Side>),
     OpError(String),

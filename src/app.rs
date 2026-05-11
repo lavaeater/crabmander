@@ -350,6 +350,14 @@ impl App {
                 } => {
                     self.get_panel_mut(side).on_dir_loaded(path, entries);
                 }
+                Action::GitInfoLoaded {
+                    side,
+                    path,
+                    branch,
+                    is_dirty,
+                } => {
+                    self.get_panel_mut(side).on_git_info_loaded(&path, branch, is_dirty);
+                }
 
                 // Execute ops (from ExecuteCopy/Move/Delete/Mkdir actions — legacy path)
                 Action::ExecuteDelete(paths) => self.do_delete(paths),

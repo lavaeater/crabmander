@@ -46,6 +46,9 @@ pub struct Panel {
     sizes_pending: usize,
     pub sort_mode: SortMode,
     pub sort_order: SortOrder,
+    /// Current branch name; `None` when not inside a git repository.
+    pub git_branch: Option<String>,
+    pub git_dirty: bool,
     action_tx: UnboundedSender<Action>,
 }
 
@@ -67,6 +70,8 @@ impl Panel {
             sizes_pending: 0,
             sort_mode: SortMode::Name,
             sort_order: SortOrder::Asc,
+            git_branch: None,
+            git_dirty: false,
             action_tx,
         }
     }
@@ -102,6 +107,8 @@ impl Panel {
             self.dir_sizes.clear();
             self.sizes_calculating = false;
             self.sizes_pending = 0;
+            self.git_branch = None;
+            self.git_dirty = false;
         }
         self.rebuild_view();
 
@@ -115,6 +122,23 @@ impl Panel {
             self.cursor = 0;
         }
         self.loading = false;
+
+        Self::load_git_info(self.path.clone(), self.side, self.action_tx.clone());
+    }
+
+    pub fn on_git_info_loaded(&mut self, path: &Path, branch: Option<String>, is_dirty: bool) {
+        if path != self.path {
+            return; // stale result from a previous directory
+        }
+        self.git_branch = branch;
+        self.git_dirty = is_dirty;
+    }
+
+    pub fn load_git_info(path: PathBuf, side: Side, tx: UnboundedSender<Action>) {
+        tokio::spawn(async move {
+            let (branch, is_dirty) = detect_git_info(&path).await;
+            let _ = tx.send(Action::GitInfoLoaded { side, path, branch, is_dirty });
+        });
     }
 
     fn rebuild_view(&mut self) {
@@ -422,7 +446,15 @@ impl Panel {
             Style::default().add_modifier(Modifier::DIM)
         };
 
-        let title = format!(" {} ", self.path.display());
+        let git_suffix = match &self.git_branch {
+            Some(branch) if self.git_dirty => format!(" [{}*]", branch),
+            Some(branch) => format!(" [{}]", branch),
+            None => String::new(),
+        };
+        // 2 border chars + 2 padding spaces + git suffix
+        let path_budget = (area.width as usize).saturating_sub(4 + git_suffix.len());
+        let condensed = condense_path(&self.path.to_string_lossy(), path_budget);
+        let title = format!(" {}{} ", condensed, git_suffix);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
@@ -866,4 +898,74 @@ fn format_age(unix_secs: u64) -> String {
     } else {
         format!("{:>6}y ago", elapsed / (86400 * 365))
     }
+}
+
+// --- Path condensing ---
+
+/// Shorten leftmost path components to their first character until the string
+/// fits within `max_chars`.  `/home/tommie/projects` → `/h/t/projects` etc.
+fn condense_path(path: &str, max_chars: usize) -> String {
+    if path.len() <= max_chars {
+        return path.to_string();
+    }
+    let has_leading = path.starts_with('/');
+    let stripped = if has_leading { &path[1..] } else { path };
+    let mut parts: Vec<String> = stripped.split('/').map(str::to_owned).collect();
+    // Shorten from left, but never shorten the last component.
+    for i in 0..parts.len().saturating_sub(1) {
+        if parts[i].len() > 1 {
+            let first = parts[i].chars().next().unwrap_or('_');
+            parts[i] = first.to_string();
+            let candidate = format!("{}{}", if has_leading { "/" } else { "" }, parts.join("/"));
+            if candidate.len() <= max_chars {
+                return candidate;
+            }
+        }
+    }
+    format!("{}{}", if has_leading { "/" } else { "" }, parts.join("/"))
+}
+
+// --- Git info ---
+
+async fn detect_git_info(start: &Path) -> (Option<String>, bool) {
+    // Walk up looking for a .git directory.
+    let mut cur = Some(start);
+    let git_dir = loop {
+        match cur {
+            None => return (None, false),
+            Some(d) => {
+                let candidate = d.join(".git");
+                if candidate.exists() {
+                    break candidate;
+                }
+                cur = d.parent();
+            }
+        }
+    };
+
+    let head = match tokio::fs::read_to_string(git_dir.join("HEAD")).await {
+        Ok(s) => s,
+        Err(_) => return (None, false),
+    };
+    let branch = if let Some(b) = head.trim().strip_prefix("ref: refs/heads/") {
+        b.to_owned()
+    } else {
+        // Detached HEAD — show short SHA
+        head.trim().chars().take(7).collect()
+    };
+
+    let is_dirty = tokio::process::Command::new("git")
+        .args([
+            "-C",
+            git_dir.parent().unwrap_or(start).to_string_lossy().as_ref(),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
+        .output()
+        .await
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    (Some(branch), is_dirty)
 }
