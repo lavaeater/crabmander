@@ -3,6 +3,31 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
+// --- Git status types ---
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GitIndexStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GitWorktreeStatus {
+    Modified,
+    Deleted,
+    Untracked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitEntry {
+    pub path: String,
+    pub index: Option<GitIndexStatus>,
+    pub worktree: Option<GitWorktreeStatus>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Left,
@@ -141,4 +166,25 @@ pub enum Action {
     DialogInputBackspace,
     DialogConfirm,
     DialogCancel,
+
+    // Git mode
+    EnterGitMode,
+    ExitGitMode,
+    GitNavUp,
+    GitNavDown,
+    GitSwitchPane,
+    GitToggleMark,
+    GitStage,
+    GitUnstage,
+    GitCommit,
+    GitPush,
+    GitPull,
+    GitReload,
+    #[strum(to_string = "GitStatusLoaded")]
+    GitStatusLoaded {
+        git_root: PathBuf,
+        branch: String,
+        entries: Vec<GitEntry>,
+    },
+    GitOpCompleted,
 }

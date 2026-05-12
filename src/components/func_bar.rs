@@ -1,36 +1,40 @@
 use ratatui::{prelude::*, widgets::Paragraph};
 
-const KEYS: &[(&str, &str, bool)] = &[
-    ("F1", "QuickCD", true),
-    ("F2", "Menu", true),
-    ("F3", "Nano", true),
-    ("F4", "Sizes", true),
-    ("F5", "Copy", true),
-    ("F6", "Move", true),
-    ("F7", "MkDir", true),
-    ("F8", "Delete", true),
-    ("F9", "Sort", true),
-    ("F10", "Quit", true),
+const NORMAL_KEYS: &[(&str, &str)] = &[
+    ("F1", "QuickCD"),
+    ("F2", "Menu"),
+    ("F3", "Nano"),
+    ("F4", "Sizes"),
+    ("F5", "Copy"),
+    ("F6", "Move"),
+    ("F7", "MkDir"),
+    ("F8", "Delete"),
+    ("F9", "Sort"),
+    ("F10", "Quit"),
 ];
 
-pub fn draw(frame: &mut Frame, area: Rect) {
+const GIT_KEYS: &[(&str, &str)] = &[
+    ("F1", "Stage"),
+    ("F2", "Unstage"),
+    ("F3", "Commit"),
+    ("F4", "Push"),
+    ("F5", "Pull"),
+    ("Tab", "Pane"),
+    ("Spc", "Mark"),
+    ("Esc", "Normal"),
+];
+
+pub fn draw(frame: &mut Frame, area: Rect, git_mode: bool) {
+    let keys = if git_mode { GIT_KEYS } else { NORMAL_KEYS };
     let mut spans = Vec::new();
-    for (key, label, enabled) in KEYS {
-        let key_style = if *enabled {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
+    for (key, label) in keys {
+        let key_style = Style::default().fg(Color::Black).bg(if git_mode {
+            Color::LightGreen
         } else {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::DIM)
-        };
-        let label_style = if *enabled {
-            Style::default()
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
+            Color::Cyan
+        });
         spans.push(Span::styled(*key, key_style));
-        spans.push(Span::styled(format!("{} ", label), label_style));
+        spans.push(Span::raw(format!("{} ", label)));
     }
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);

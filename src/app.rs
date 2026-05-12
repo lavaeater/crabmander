@@ -9,6 +9,7 @@ use crate::{
     components::{
         dialog::{self, DeferredOp, DialogState, MenuAction, MenuItem},
         func_bar,
+        git_view::GitView,
         panel::{
             Panel, copy_recursive, delete_recursive, extract_archive, file_name_of, is_archive,
             is_executable,
@@ -23,6 +24,7 @@ pub enum Mode {
     #[default]
     Normal,
     Dialog,
+    Git,
 }
 
 pub struct App {
@@ -41,6 +43,9 @@ pub struct App {
     /// Command to run after suspending the TUI (set by Execute action).
     /// Tuple: (cmd, args, sides_to_reload_after).
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
+    /// Git command to run with TUI suspended; after exit, reloads git status.
+    pending_git_op: Option<(String, Vec<String>)>,
+    git_view: Option<GitView>,
     should_quit: bool,
     should_suspend: bool,
     last_tick_key_events: Vec<KeyEvent>,
@@ -69,6 +74,8 @@ impl App {
             last_error: None,
             dir_size_cache: std::collections::HashMap::new(),
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
+            pending_git_op: None,
+            git_view: None,
             should_quit: false,
             should_suspend: false,
             last_tick_key_events: Vec::new(),
@@ -104,6 +111,18 @@ impl App {
                 for side in reload {
                     self.get_panel(side).reload();
                 }
+            }
+
+            // Run a pending git operation (commit/push/pull): suspend TUI, exec, reload status.
+            if let Some((cmd, args)) = self.pending_git_op.take() {
+                tui.exit()?;
+                std::process::Command::new(&cmd).args(&args).status().ok();
+                println!("\nPress Enter to continue...");
+                let mut _s = String::new();
+                std::io::stdin().read_line(&mut _s).ok();
+                tui.enter()?;
+                action_tx.send(Action::ClearScreen)?;
+                action_tx.send(Action::GitOpCompleted)?;
             }
 
             if self.should_suspend {
@@ -183,6 +202,32 @@ impl App {
                     tx.send(Action::DialogInputChar(c))?;
                 }
                 _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.mode == Mode::Git {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
+                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitNavUp)?,
+                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitNavDown)?,
+                KeyCode::Tab => tx.send(Action::GitSwitchPane)?,
+                KeyCode::Char(' ') | KeyCode::Insert => tx.send(Action::GitToggleMark)?,
+                KeyCode::F(1) | KeyCode::Char('a') => tx.send(Action::GitStage)?,
+                KeyCode::F(2) | KeyCode::Char('u') => tx.send(Action::GitUnstage)?,
+                KeyCode::F(3) | KeyCode::Char('c') => tx.send(Action::GitCommit)?,
+                KeyCode::F(4) | KeyCode::Char('p') => tx.send(Action::GitPush)?,
+                KeyCode::F(5) | KeyCode::Char('P') => tx.send(Action::GitPull)?,
+                KeyCode::Char('r') => tx.send(Action::GitReload)?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Ctrl+G enters git mode when the active panel is inside a git repo.
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('g') {
+            if self.active_panel().git_branch.is_some() {
+                tx.send(Action::EnterGitMode)?;
             }
             return Ok(());
         }
@@ -407,6 +452,37 @@ impl App {
                     }
                 }
 
+                // Git mode
+                Action::EnterGitMode => self.enter_git_mode(),
+                Action::ExitGitMode => self.exit_git_mode(),
+                Action::GitNavUp => {
+                    if let Some(gv) = &mut self.git_view { gv.nav_up(); }
+                }
+                Action::GitNavDown => {
+                    if let Some(gv) = &mut self.git_view { gv.nav_down(); }
+                }
+                Action::GitSwitchPane => {
+                    if let Some(gv) = &mut self.git_view { gv.switch_pane(); }
+                }
+                Action::GitToggleMark => {
+                    if let Some(gv) = &mut self.git_view { gv.toggle_mark(); }
+                }
+                Action::GitStage => self.do_git_stage(),
+                Action::GitUnstage => self.do_git_unstage(),
+                Action::GitCommit => self.do_git_commit(),
+                Action::GitPush => self.do_git_push(),
+                Action::GitPull => self.do_git_pull(),
+                Action::GitReload | Action::GitOpCompleted => {
+                    if let Some(gv) = &self.git_view {
+                        GitView::load_status(gv.git_root.clone(), self.action_tx.clone());
+                    }
+                }
+                Action::GitStatusLoaded { git_root: _, branch, entries } => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.on_status_loaded(branch, entries);
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -419,6 +495,8 @@ impl App {
         let active = self.active;
         let dialog = &self.dialog;
         let last_error = &self.last_error;
+        let git_view = &self.git_view;
+        let git_mode = self.mode == Mode::Git;
 
         tui.draw(|frame| {
             let area = frame.area();
@@ -429,21 +507,24 @@ impl App {
             ])
             .areas(area);
 
-            let [left_area, right_area] =
-                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .areas(panels_area);
-
-            left.draw(frame, left_area);
-            right.draw(frame, right_area);
-
-            let active_panel = if active == Side::Left {
-                &*left
+            if git_mode {
+                if let Some(gv) = git_view {
+                    gv.draw(frame, panels_area);
+                    draw_git_status_bar(frame, status_area, gv, last_error.as_deref());
+                }
             } else {
-                &*right
-            };
-            draw_status_bar(frame, status_area, active_panel, last_error.as_deref());
+                let [left_area, right_area] =
+                    Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                        .areas(panels_area);
 
-            func_bar::draw(frame, func_area);
+                left.draw(frame, left_area);
+                right.draw(frame, right_area);
+
+                let active_panel = if active == Side::Left { &*left } else { &*right };
+                draw_status_bar(frame, status_area, active_panel, last_error.as_deref());
+            }
+
+            func_bar::draw(frame, func_area, git_mode);
 
             if let Some(d) = dialog {
                 dialog::draw(frame, d, area);
@@ -979,6 +1060,100 @@ impl App {
             let _ = tx.send(Action::OpCompleted(vec![active]));
         });
     }
+
+    // --- Git mode ---
+
+    fn enter_git_mode(&mut self) {
+        let panel = self.active_panel();
+        let branch = panel.git_branch.clone().unwrap_or_default();
+        let Some(git_root) = find_git_root(&panel.path) else { return };
+        let gv = GitView::new(git_root.clone(), branch);
+        GitView::load_status(git_root, self.action_tx.clone());
+        self.git_view = Some(gv);
+        self.mode = Mode::Git;
+        self.last_error = None;
+    }
+
+    fn exit_git_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.git_view = None;
+        // Reload both panels in case git ops changed the filesystem.
+        self.left.reload();
+        self.right.reload();
+    }
+
+    fn do_git_stage(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let targets = gv.stage_targets();
+        if targets.is_empty() { return; }
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::process::Command::new("git")
+                .arg("-C").arg(&git_root)
+                .arg("add").arg("--")
+                .args(&targets)
+                .status()
+                .await;
+            match result {
+                Ok(s) if s.success() => { let _ = tx.send(Action::GitOpCompleted); }
+                Ok(s) => { let _ = tx.send(Action::OpError(format!("git add failed (exit {})", s.code().unwrap_or(-1)))); }
+                Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
+            }
+        });
+    }
+
+    fn do_git_unstage(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let targets = gv.unstage_targets();
+        if targets.is_empty() { return; }
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::process::Command::new("git")
+                .arg("-C").arg(&git_root)
+                .args(["restore", "--staged", "--"])
+                .args(&targets)
+                .status()
+                .await;
+            match result {
+                Ok(s) if s.success() => { let _ = tx.send(Action::GitOpCompleted); }
+                Ok(s) => { let _ = tx.send(Action::OpError(format!("git restore --staged failed (exit {})", s.code().unwrap_or(-1)))); }
+                Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
+            }
+        });
+    }
+
+    fn do_git_commit(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        if !gv.has_staged() {
+            self.last_error = Some("Nothing staged to commit".into());
+            return;
+        }
+        let git_root = gv.git_root.clone();
+        self.pending_git_op = Some((
+            "git".into(),
+            vec!["-C".into(), git_root.to_string_lossy().into_owned(), "commit".into()],
+        ));
+    }
+
+    fn do_git_push(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        self.pending_git_op = Some((
+            "git".into(),
+            vec!["-C".into(), git_root.to_string_lossy().into_owned(), "push".into()],
+        ));
+    }
+
+    fn do_git_pull(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        self.pending_git_op = Some((
+            "git".into(),
+            vec!["-C".into(), git_root.to_string_lossy().into_owned(), "pull".into()],
+        ));
+    }
 }
 
 // --- Status bar ---
@@ -1034,6 +1209,45 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
             .style(Style::default().fg(Color::Yellow)),
         right_area,
     );
+}
+
+fn draw_git_status_bar(frame: &mut Frame, area: Rect, gv: &GitView, error: Option<&str>) {
+    use ratatui::widgets::Paragraph;
+
+    if let Some(err) = error {
+        frame.render_widget(
+            Paragraph::new(err).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            area,
+        );
+        return;
+    }
+
+    let left = format!(" Git: {}  [{}]", gv.git_root.display(), gv.branch);
+    let hint = " ^G exit  a/F1 stage  u/F2 unstage  c/F3 commit  p push  P pull  r reload ";
+    let hint_w = hint.len() as u16;
+    let [left_area, right_area] =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(hint_w)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(left).style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        left_area,
+    );
+    frame.render_widget(
+        Paragraph::new(hint)
+            .alignment(Alignment::Right)
+            .style(Style::default().add_modifier(Modifier::DIM)),
+        right_area,
+    );
+}
+
+fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = Some(start);
+    while let Some(dir) = cur {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
 }
 
 // --- QuickCd helpers ---
