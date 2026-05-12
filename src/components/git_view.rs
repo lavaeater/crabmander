@@ -182,21 +182,17 @@ impl GitView {
 
     // --- Drawing ---
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let [left_area, right_area] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(area);
-        self.draw_worktree(frame, left_area);
-        self.draw_staging(frame, right_area);
+        self.draw_worktree(frame, left_area, palette);
+        self.draw_staging(frame, right_area, palette);
     }
 
-    fn draw_worktree(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_worktree(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let is_active = self.active_pane == GitPane::Worktree;
-        let border_style = if is_active {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
+        let border_style = if is_active { palette.border_active } else { palette.border_inactive };
         let wt_count = self.entries.iter().filter(|e| e.worktree.is_some()).count();
         let block = Block::default()
             .borders(Borders::ALL)
@@ -237,10 +233,10 @@ impl GitView {
             .map(|(i, (path, _idx, wt))| {
                 let is_cursor = i == self.left_cursor;
                 let is_marked = self.left_marked.contains(path);
-                let (ch, col) = worktree_status_display(wt.as_ref().unwrap());
+                let (ch, base_style) = worktree_status_display(wt.as_ref().unwrap(), palette);
                 let mark = if is_marked { "*" } else { " " };
                 let label = format!(" {} {} {}", mark, ch, path);
-                let base = if is_marked { Style::default().fg(Color::Yellow) } else { Style::default().fg(col) };
+                let base = if is_marked { palette.entry_marked } else { base_style };
                 let style = if is_cursor && is_active {
                     base.add_modifier(Modifier::REVERSED)
                 } else if is_cursor {
@@ -255,13 +251,9 @@ impl GitView {
         frame.render_widget(List::new(items), inner);
     }
 
-    fn draw_staging(&mut self, frame: &mut Frame, area: Rect) {
+    fn draw_staging(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let is_active = self.active_pane == GitPane::Staging;
-        let border_style = if is_active {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
+        let border_style = if is_active { palette.border_active } else { palette.border_inactive };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
@@ -299,10 +291,10 @@ impl GitView {
             .map(|(i, (path, idx, _wt))| {
                 let is_cursor = i == self.right_cursor;
                 let is_marked = self.right_marked.contains(path);
-                let (ch, col) = index_status_display(idx.as_ref().unwrap());
+                let (ch, base_style) = index_status_display(idx.as_ref().unwrap(), palette);
                 let mark = if is_marked { "*" } else { " " };
                 let label = format!(" {} {} {}", mark, ch, path);
-                let base = if is_marked { Style::default().fg(Color::Yellow) } else { Style::default().fg(col) };
+                let base = if is_marked { palette.entry_marked } else { base_style };
                 let style = if is_cursor && is_active {
                     base.add_modifier(Modifier::REVERSED)
                 } else if is_cursor {
@@ -320,21 +312,27 @@ impl GitView {
 
 // --- Display helpers ---
 
-fn worktree_status_display(s: &GitWorktreeStatus) -> (&'static str, Color) {
+fn worktree_status_display(
+    s: &GitWorktreeStatus,
+    p: &crate::palette::Palette,
+) -> (&'static str, Style) {
     match s {
-        GitWorktreeStatus::Modified  => ("M", Color::Yellow),
-        GitWorktreeStatus::Deleted   => ("D", Color::Red),
-        GitWorktreeStatus::Untracked => ("?", Color::White),  // Gray is invisible on dark terminals
+        GitWorktreeStatus::Modified  => ("M", p.git_wt_modified),
+        GitWorktreeStatus::Deleted   => ("D", p.git_wt_deleted),
+        GitWorktreeStatus::Untracked => ("?", p.git_wt_untracked),
     }
 }
 
-fn index_status_display(s: &GitIndexStatus) -> (&'static str, Color) {
+fn index_status_display(
+    s: &GitIndexStatus,
+    p: &crate::palette::Palette,
+) -> (&'static str, Style) {
     match s {
-        GitIndexStatus::Added => ("A", Color::Green),
-        GitIndexStatus::Modified => ("M", Color::Cyan),
-        GitIndexStatus::Deleted => ("D", Color::Red),
-        GitIndexStatus::Renamed => ("R", Color::Cyan),
-        GitIndexStatus::Copied => ("C", Color::Cyan),
+        GitIndexStatus::Added    => ("A", p.git_idx_added),
+        GitIndexStatus::Modified => ("M", p.git_idx_modified),
+        GitIndexStatus::Deleted  => ("D", p.git_idx_deleted),
+        GitIndexStatus::Renamed  => ("R", p.git_idx_renamed),
+        GitIndexStatus::Copied   => ("C", p.git_idx_renamed),
     }
 }
 

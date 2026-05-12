@@ -439,11 +439,11 @@ impl Panel {
 
     // --- Draw ---
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let border_style = if self.is_active {
-            Style::default().fg(Color::Cyan)
+            palette.border_active
         } else {
-            Style::default().add_modifier(Modifier::DIM)
+            palette.border_inactive
         };
 
         let git_suffix = match &self.git_branch {
@@ -505,8 +505,7 @@ impl Panel {
         if let Some(farea) = filter_area {
             let filter_text = format!(" Filter: {}_", self.filter);
             frame.render_widget(
-                Paragraph::new(filter_text)
-                    .style(Style::default().fg(Color::Black).bg(Color::Yellow)),
+                Paragraph::new(filter_text).style(palette.filter_bar),
                 farea,
             );
         }
@@ -555,13 +554,13 @@ impl Panel {
                 let row = Row::new(vec![display_name, size_str, date_str, owner_str]);
 
                 let base = if is_marked {
-                    Style::default().fg(Color::Yellow)
+                    palette.entry_marked
                 } else if e.is_dir {
-                    Style::default().fg(Color::Cyan)
+                    palette.entry_dir
                 } else if e.is_symlink {
-                    Style::default().fg(Color::Magenta)      // symlink → magenta
+                    palette.entry_symlink
                 } else if e.nlink > 1 {
-                    Style::default().fg(Color::Green)        // hard-linked → green
+                    palette.entry_hardlink
                 } else {
                     Style::default()
                 };

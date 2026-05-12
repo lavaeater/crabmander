@@ -16,6 +16,7 @@ use crate::{
         },
     },
     config::Config,
+    palette::Palette,
     tui::{Event, Tui},
 };
 
@@ -29,6 +30,7 @@ pub enum Mode {
 
 pub struct App {
     config: Config,
+    palette: Palette,
     tick_rate: f64,
     frame_rate: f64,
     left: Panel,
@@ -62,8 +64,17 @@ impl App {
         let right = Panel::new(Side::Right, cwd, action_tx.clone());
         left.is_active = true;
 
+        let config = Config::new()?;
+        let opaline_theme = opaline::builtins::load_by_name(&config.theme)
+            .unwrap_or_else(|| {
+                tracing::warn!("unknown theme {:?}, falling back to catppuccin-mocha", config.theme);
+                opaline::builtins::load_by_name("catppuccin-mocha").expect("builtin must exist")
+            });
+        let palette = Palette::from(&opaline_theme);
+
         Ok(Self {
-            config: Config::new()?,
+            config,
+            palette,
             tick_rate,
             frame_rate,
             left,
@@ -497,6 +508,7 @@ impl App {
         let last_error = &self.last_error;
         let git_view = &mut self.git_view;
         let git_mode = self.mode == Mode::Git;
+        let palette = &self.palette;
 
         tui.draw(|frame| {
             let area = frame.area();
@@ -509,25 +521,25 @@ impl App {
 
             if git_mode {
                 if let Some(gv) = git_view.as_mut() {
-                    draw_git_status_bar(frame, status_area, gv, last_error.as_deref());
-                    gv.draw(frame, panels_area);
+                    draw_git_status_bar(frame, status_area, gv, last_error.as_deref(), palette);
+                    gv.draw(frame, panels_area, palette);
                 }
             } else {
                 let [left_area, right_area] =
                     Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                         .areas(panels_area);
 
-                left.draw(frame, left_area);
-                right.draw(frame, right_area);
+                left.draw(frame, left_area, palette);
+                right.draw(frame, right_area, palette);
 
                 let active_panel = if active == Side::Left { &*left } else { &*right };
-                draw_status_bar(frame, status_area, active_panel, last_error.as_deref());
+                draw_status_bar(frame, status_area, active_panel, last_error.as_deref(), palette);
             }
 
-            func_bar::draw(frame, func_area, git_mode);
+            func_bar::draw(frame, func_area, git_mode, palette);
 
             if let Some(d) = dialog {
-                dialog::draw(frame, d, area);
+                dialog::draw(frame, d, area, palette);
             }
         })?;
         Ok(())
@@ -1158,14 +1170,17 @@ impl App {
 
 // --- Status bar ---
 
-fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&str>) {
+fn draw_status_bar(
+    frame: &mut Frame,
+    area: Rect,
+    panel: &Panel,
+    error: Option<&str>,
+    palette: &Palette,
+) {
     use ratatui::widgets::Paragraph;
 
     if let Some(err) = error {
-        frame.render_widget(
-            Paragraph::new(err).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            area,
-        );
+        frame.render_widget(Paragraph::new(err).style(palette.status_error), area);
         return;
     }
 
@@ -1198,27 +1213,29 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, panel: &Panel, error: Option<&
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_w)]).areas(area);
 
-    let left_full = format!("{}{}", left_text, filter_text);
     frame.render_widget(
-        Paragraph::new(left_full).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(format!("{}{}", left_text, filter_text)).style(palette.status_normal),
         left_area,
     );
     frame.render_widget(
         Paragraph::new(right_text)
             .alignment(Alignment::Right)
-            .style(Style::default().fg(Color::Yellow)),
+            .style(palette.status_size),
         right_area,
     );
 }
 
-fn draw_git_status_bar(frame: &mut Frame, area: Rect, gv: &GitView, error: Option<&str>) {
+fn draw_git_status_bar(
+    frame: &mut Frame,
+    area: Rect,
+    gv: &GitView,
+    error: Option<&str>,
+    palette: &Palette,
+) {
     use ratatui::widgets::Paragraph;
 
     if let Some(err) = error {
-        frame.render_widget(
-            Paragraph::new(err).style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            area,
-        );
+        frame.render_widget(Paragraph::new(err).style(palette.status_error), area);
         return;
     }
 
@@ -1227,10 +1244,7 @@ fn draw_git_status_bar(frame: &mut Frame, area: Rect, gv: &GitView, error: Optio
     let hint_w = hint.len() as u16;
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hint_w)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(left).style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        left_area,
-    );
+    frame.render_widget(Paragraph::new(left).style(palette.git_status_bar), left_area);
     frame.render_widget(
         Paragraph::new(hint)
             .alignment(Alignment::Right)

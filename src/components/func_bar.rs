@@ -1,5 +1,7 @@
 use ratatui::{prelude::*, widgets::Paragraph};
 
+use crate::palette::Palette;
+
 const NORMAL_KEYS: &[(&str, &str)] = &[
     ("F1", "QuickCD"),
     ("F2", "Menu"),
@@ -24,18 +26,13 @@ const GIT_KEYS: &[(&str, &str)] = &[
     ("Esc", "Normal"),
 ];
 
-pub fn draw(frame: &mut Frame, area: Rect, git_mode: bool) {
+pub fn draw(frame: &mut Frame, area: Rect, git_mode: bool, palette: &Palette) {
     let keys = if git_mode { GIT_KEYS } else { NORMAL_KEYS };
+    let key_style = if git_mode { palette.funcbar_git } else { palette.funcbar_normal };
     let mut spans = Vec::new();
     for (key, label) in keys {
-        let key_style = Style::default().fg(Color::Black).bg(if git_mode {
-            Color::LightGreen
-        } else {
-            Color::Cyan
-        });
         spans.push(Span::styled(*key, key_style));
         spans.push(Span::raw(format!("{} ", label)));
     }
-    let line = Line::from(spans);
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
