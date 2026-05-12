@@ -495,7 +495,7 @@ impl App {
         let active = self.active;
         let dialog = &self.dialog;
         let last_error = &self.last_error;
-        let git_view = &self.git_view;
+        let git_view = &mut self.git_view;
         let git_mode = self.mode == Mode::Git;
 
         tui.draw(|frame| {
@@ -508,9 +508,9 @@ impl App {
             .areas(area);
 
             if git_mode {
-                if let Some(gv) = git_view {
-                    gv.draw(frame, panels_area);
+                if let Some(gv) = git_view.as_mut() {
                     draw_git_status_bar(frame, status_area, gv, last_error.as_deref());
+                    gv.draw(frame, panels_area);
                 }
             } else {
                 let [left_area, right_area] =
