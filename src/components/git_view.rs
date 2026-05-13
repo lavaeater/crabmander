@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use std::{collections::HashSet, path::PathBuf};
 
 use ratatui::{
     prelude::*,
@@ -157,26 +157,81 @@ impl GitView {
 
     pub fn load_status(git_root: PathBuf, tx: UnboundedSender<Action>) {
         tokio::spawn(async move {
-            let output = tokio::process::Command::new("git")
-                .arg("-C")
-                .arg(&git_root)
-                // --untracked-files=normal overrides any repo/global showUntrackedFiles=no.
-                // --porcelain is the stable short-format alias for --porcelain=v1.
-                .args(["status", "--porcelain", "--untracked-files=normal"])
-                .output()
-                .await;
+            let result = tokio::task::spawn_blocking({
+                let git_root = git_root.clone();
+                move || {
+                    let repo = git2::Repository::open(&git_root)?;
 
-            let Ok(out) = output else {
-                info!("git status command failed to run");
-                return;
-            };
-            let text = String::from_utf8_lossy(&out.stdout);
-            info!("git status raw output ({} bytes, exit {:?}):\n{}", text.len(), out.status.code(), text);
-            let entries = parse_porcelain(&text);
-            info!("parsed {} entries: {:?}", entries.len(), entries.iter().map(|e| (&e.path, e.worktree.as_ref().map(|w| format!("{:?}", w)))).collect::<Vec<_>>());
+                    let branch = repo
+                        .head()
+                        .ok()
+                        .and_then(|h| h.shorthand().map(str::to_owned))
+                        .unwrap_or_else(|| "HEAD".into());
 
-            let branch = read_branch(&git_root).await;
-            let _ = tx.send(Action::GitStatusLoaded { git_root, branch, entries });
+                    let mut opts = git2::StatusOptions::new();
+                    opts.include_untracked(true)
+                        .recurse_untracked_dirs(true)
+                        .include_ignored(false);
+                    let statuses = repo.statuses(Some(&mut opts))?;
+
+                    let entries: Vec<GitEntry> = statuses
+                        .iter()
+                        .filter_map(|e| {
+                            let path = e.path().unwrap_or("").to_string();
+                            let s = e.status();
+                            let index = if s.contains(git2::Status::INDEX_NEW) {
+                                Some(GitIndexStatus::Added)
+                            } else if s.contains(git2::Status::INDEX_MODIFIED)
+                                || s.contains(git2::Status::INDEX_TYPECHANGE)
+                            {
+                                Some(GitIndexStatus::Modified)
+                            } else if s.contains(git2::Status::INDEX_DELETED) {
+                                Some(GitIndexStatus::Deleted)
+                            } else if s.contains(git2::Status::INDEX_RENAMED) {
+                                Some(GitIndexStatus::Renamed)
+                            } else {
+                                None
+                            };
+                            let worktree = if s.contains(git2::Status::WT_NEW) {
+                                Some(GitWorktreeStatus::Untracked)
+                            } else if s.contains(git2::Status::WT_MODIFIED)
+                                || s.contains(git2::Status::WT_TYPECHANGE)
+                            {
+                                Some(GitWorktreeStatus::Modified)
+                            } else if s.contains(git2::Status::WT_DELETED) {
+                                Some(GitWorktreeStatus::Deleted)
+                            } else {
+                                None
+                            };
+                            if index.is_some() || worktree.is_some() {
+                                Some(GitEntry { path, index, worktree })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    info!(
+                        "git2 status: {} entries on branch {:?}",
+                        entries.len(),
+                        branch
+                    );
+                    Ok::<_, git2::Error>((branch, entries))
+                }
+            })
+            .await;
+
+            match result {
+                Ok(Ok((branch, entries))) => {
+                    let _ = tx.send(Action::GitStatusLoaded { git_root, branch, entries });
+                }
+                Ok(Err(e)) => {
+                    info!("git2 status error: {}", e);
+                }
+                Err(e) => {
+                    info!("spawn_blocking error: {}", e);
+                }
+            }
         });
     }
 
@@ -336,110 +391,3 @@ fn index_status_display(
     }
 }
 
-// --- Async helpers ---
-
-async fn read_branch(git_root: &Path) -> String {
-    let head = tokio::fs::read_to_string(git_root.join(".git/HEAD"))
-        .await
-        .unwrap_or_default();
-    if let Some(b) = head.trim().strip_prefix("ref: refs/heads/") {
-        b.to_owned()
-    } else {
-        head.trim().chars().take(7).collect()
-    }
-}
-
-// --- Status parsing ---
-
-fn parse_porcelain(output: &str) -> Vec<GitEntry> {
-    let mut entries = Vec::new();
-    for line in output.lines() {
-        // Every porcelain line is: X Y <space> path  (minimum 4 bytes)
-        let b = line.as_bytes();
-        if b.len() < 4 {
-            continue;
-        }
-        let x = b[0];
-        let y = b[1];
-        // b[2] is always an ASCII space
-        let rest = &line[3..];
-
-        // Untracked: both status chars are '?'
-        if x == b'?' && y == b'?' {
-            let path = rest.to_string();
-            entries.push(GitEntry { path, index: None, worktree: Some(GitWorktreeStatus::Untracked) });
-            continue;
-        }
-
-        // Ignored lines ('!') — skip
-        if x == b'!' {
-            continue;
-        }
-
-        // Rename/copy: "orig -> dest" — keep only dest.
-        let path = rest
-            .split_once(" -> ")
-            .map(|(_, dst)| dst)
-            .unwrap_or(rest)
-            .to_string();
-
-        let index = match x {
-            b'A' => Some(GitIndexStatus::Added),
-            b'M' => Some(GitIndexStatus::Modified),
-            b'D' => Some(GitIndexStatus::Deleted),
-            b'R' => Some(GitIndexStatus::Renamed),
-            b'C' => Some(GitIndexStatus::Copied),
-            _ => None,
-        };
-        let worktree = match y {
-            b'M' => Some(GitWorktreeStatus::Modified),
-            b'D' => Some(GitWorktreeStatus::Deleted),
-            _ => None,
-        };
-
-        if index.is_some() || worktree.is_some() {
-            entries.push(GitEntry { path, index, worktree });
-        }
-    }
-    entries
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_untracked_and_modified() {
-        let input = " M src/app.rs\n?? src/components/git_view.rs\n";
-        let entries = parse_porcelain(input);
-        assert_eq!(
-            entries.len(),
-            2,
-            "expected 2 entries, got {}: {:?}",
-            entries.len(),
-            entries.iter().map(|e| &e.path).collect::<Vec<_>>()
-        );
-        assert_eq!(entries[0].path, "src/app.rs");
-        assert!(matches!(entries[0].worktree, Some(GitWorktreeStatus::Modified)));
-        assert_eq!(entries[1].path, "src/components/git_view.rs");
-        assert!(matches!(entries[1].worktree, Some(GitWorktreeStatus::Untracked)));
-        assert!(entries[1].index.is_none());
-    }
-
-    #[test]
-    fn parse_deleted_in_worktree() {
-        let input = " D deleted.txt\n";
-        let entries = parse_porcelain(input);
-        assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0].worktree, Some(GitWorktreeStatus::Deleted)));
-    }
-
-    #[test]
-    fn parse_staged_new_file() {
-        let input = "A  new.txt\n";
-        let entries = parse_porcelain(input);
-        assert_eq!(entries.len(), 1);
-        assert!(matches!(entries[0].index, Some(GitIndexStatus::Added)));
-        assert!(entries[0].worktree.is_none());
-    }
-}

@@ -180,6 +180,8 @@ pub enum Action {
     GitStage,
     GitUnstage,
     GitCommit,
+    GitCommitSubmit,
+    GitCommitCancel,
     GitPush,
     GitPull,
     GitReload,

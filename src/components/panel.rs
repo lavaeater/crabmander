@@ -927,44 +927,27 @@ fn condense_path(path: &str, max_chars: usize) -> String {
 // --- Git info ---
 
 async fn detect_git_info(start: &Path) -> (Option<String>, bool) {
-    // Walk up looking for a .git directory.
-    let mut cur = Some(start);
-    let git_dir = loop {
-        match cur {
-            None => return (None, false),
-            Some(d) => {
-                let candidate = d.join(".git");
-                if candidate.exists() {
-                    break candidate;
-                }
-                cur = d.parent();
-            }
-        }
-    };
-
-    let head = match tokio::fs::read_to_string(git_dir.join("HEAD")).await {
-        Ok(s) => s,
-        Err(_) => return (None, false),
-    };
-    let branch = if let Some(b) = head.trim().strip_prefix("ref: refs/heads/") {
-        b.to_owned()
-    } else {
-        // Detached HEAD — show short SHA
-        head.trim().chars().take(7).collect()
-    };
-
-    let is_dirty = tokio::process::Command::new("git")
-        .args([
-            "-C",
-            git_dir.parent().unwrap_or(start).to_string_lossy().as_ref(),
-            "status",
-            "--porcelain",
-            "--untracked-files=no",
-        ])
-        .output()
-        .await
-        .map(|o| !o.stdout.is_empty())
-        .unwrap_or(false);
-
-    (Some(branch), is_dirty)
+    let start = start.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let repo = match git2::Repository::discover(&start) {
+            Ok(r) => r,
+            Err(_) => return (None, false),
+        };
+        let branch = repo
+            .head()
+            .ok()
+            .and_then(|h| h.shorthand().map(str::to_owned))
+            .unwrap_or_else(|| "HEAD".into());
+        let is_dirty = repo
+            .statuses(Some(
+                git2::StatusOptions::new()
+                    .include_untracked(false)
+                    .include_ignored(false),
+            ))
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        (Some(branch), is_dirty)
+    })
+    .await
+    .unwrap_or((None, false))
 }

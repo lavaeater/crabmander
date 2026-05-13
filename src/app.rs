@@ -1,5 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::prelude::*;
+use ratatui::{prelude::*, widgets::Clear};
+use ratatui_textarea::TextArea;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
@@ -27,6 +28,7 @@ pub enum Mode {
     Normal,
     Dialog,
     Git,
+    GitCommit,
 }
 
 pub struct App {
@@ -46,9 +48,8 @@ pub struct App {
     /// Command to run after suspending the TUI (set by Execute action).
     /// Tuple: (cmd, args, sides_to_reload_after).
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
-    /// Git command to run with TUI suspended; after exit, reloads git status.
-    pending_git_op: Option<(String, Vec<String>)>,
     git_view: Option<GitView>,
+    commit_textarea: Option<TextArea<'static>>,
     git_watcher: Option<tokio_util::sync::CancellationToken>,
     recent_dirs: Vec<std::path::PathBuf>,
     should_quit: bool,
@@ -88,8 +89,8 @@ impl App {
             last_error: None,
             dir_size_cache: std::collections::HashMap::new(),
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
-            pending_git_op: None,
             git_view: None,
+            commit_textarea: None,
             git_watcher: None,
             recent_dirs: recent_dirs::load(&get_data_dir()),
             should_quit: false,
@@ -127,18 +128,6 @@ impl App {
                 for side in reload {
                     self.get_panel(side).reload();
                 }
-            }
-
-            // Run a pending git operation (commit/push/pull): suspend TUI, exec, reload status.
-            if let Some((cmd, args)) = self.pending_git_op.take() {
-                tui.exit()?;
-                std::process::Command::new(&cmd).args(&args).status().ok();
-                println!("\nPress Enter to continue...");
-                let mut _s = String::new();
-                std::io::stdin().read_line(&mut _s).ok();
-                tui.enter()?;
-                action_tx.send(Action::ClearScreen)?;
-                action_tx.send(Action::GitOpCompleted)?;
             }
 
             if self.should_suspend {
@@ -218,6 +207,21 @@ impl App {
                     tx.send(Action::DialogInputChar(c))?;
                 }
                 _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.mode == Mode::GitCommit {
+            match key.code {
+                KeyCode::Esc => tx.send(Action::GitCommitCancel)?,
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    tx.send(Action::GitCommitSubmit)?;
+                }
+                _ => {
+                    if let Some(ta) = &mut self.commit_textarea {
+                        ta.input(key);
+                    }
+                }
             }
             return Ok(());
         }
@@ -489,6 +493,8 @@ impl App {
                 Action::GitStage => self.do_git_stage(),
                 Action::GitUnstage => self.do_git_unstage(),
                 Action::GitCommit => self.do_git_commit(),
+                Action::GitCommitSubmit => self.submit_git_commit(),
+                Action::GitCommitCancel => self.cancel_git_commit(),
                 Action::GitPush => self.do_git_push(),
                 Action::GitPull => self.do_git_pull(),
                 Action::GitReload | Action::GitOpCompleted => {
@@ -515,7 +521,8 @@ impl App {
         let dialog = &self.dialog;
         let last_error = &self.last_error;
         let git_view = &mut self.git_view;
-        let git_mode = self.mode == Mode::Git;
+        let git_mode = self.mode == Mode::Git || self.mode == Mode::GitCommit;
+        let commit_textarea = &mut self.commit_textarea;
         let palette = &self.palette;
 
         tui.draw(|frame| {
@@ -531,6 +538,9 @@ impl App {
                 if let Some(gv) = git_view.as_mut() {
                     draw_git_status_bar(frame, status_area, gv, last_error.as_deref(), palette);
                     gv.draw(frame, panels_area, palette);
+                }
+                if let Some(ta) = commit_textarea {
+                    draw_commit_textarea(frame, panels_area, ta);
                 }
             } else {
                 let [left_area, right_area] =
@@ -1164,17 +1174,17 @@ impl App {
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
-            let result = tokio::process::Command::new("git")
-                .arg("-C").arg(&git_root)
-                .arg("add").arg("--")
-                .args(&targets)
-                .status()
-                .await;
-            match result {
-                Ok(s) if s.success() => { let _ = tx.send(Action::GitOpCompleted); }
-                Ok(s) => { let _ = tx.send(Action::OpError(format!("git add failed (exit {})", s.code().unwrap_or(-1)))); }
-                Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
-            }
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let mut index = repo.index()?;
+                for path in &targets {
+                    index.add_path(std::path::Path::new(path))?;
+                }
+                index.write()?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
         });
     }
 
@@ -1185,17 +1195,17 @@ impl App {
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
-            let result = tokio::process::Command::new("git")
-                .arg("-C").arg(&git_root)
-                .args(["restore", "--staged", "--"])
-                .args(&targets)
-                .status()
-                .await;
-            match result {
-                Ok(s) if s.success() => { let _ = tx.send(Action::GitOpCompleted); }
-                Ok(s) => { let _ = tx.send(Action::OpError(format!("git restore --staged failed (exit {})", s.code().unwrap_or(-1)))); }
-                Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
-            }
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let head_obj = repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.peel(git2::ObjectType::Commit).ok());
+                repo.reset_default(head_obj.as_ref(), targets.iter())?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
         });
     }
 
@@ -1205,29 +1215,120 @@ impl App {
             self.last_error = Some("Nothing staged to commit".into());
             return;
         }
+        let mut ta = TextArea::default();
+        ta.set_block(
+            ratatui::widgets::Block::default()
+                .borders(ratatui::widgets::Borders::ALL)
+                .title(" Commit message — Ctrl+Enter to commit, Esc to cancel "),
+        );
+        self.commit_textarea = Some(ta);
+        self.mode = Mode::GitCommit;
+    }
+
+    fn submit_git_commit(&mut self) {
+        let Some(ta) = self.commit_textarea.take() else { return };
+        self.mode = Mode::Git;
+        let msg = ta.lines().join("\n");
+        if msg.trim().is_empty() {
+            self.last_error = Some("Commit message is empty".into());
+            return;
+        }
+        let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
-        self.pending_git_op = Some((
-            "git".into(),
-            vec!["-C".into(), git_root.to_string_lossy().into_owned(), "commit".into()],
-        ));
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let sig = repo.signature()?;
+                let mut index = repo.index()?;
+                let tree_id = index.write_tree()?;
+                let tree = repo.find_tree(tree_id)?;
+                let parent: Option<git2::Commit> =
+                    repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+                let parents: Vec<&git2::Commit> = parent.iter().collect();
+                repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+
+    fn cancel_git_commit(&mut self) {
+        self.commit_textarea = None;
+        self.mode = Mode::Git;
     }
 
     fn do_git_push(&mut self) {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
-        self.pending_git_op = Some((
-            "git".into(),
-            vec!["-C".into(), git_root.to_string_lossy().into_owned(), "push".into()],
-        ));
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let branch = repo
+                    .head()?
+                    .shorthand()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "main".into());
+                let mut remote = repo.find_remote("origin")?;
+                let mut callbacks = git2::RemoteCallbacks::new();
+                callbacks.credentials(git2_cred_callback);
+                let mut push_opts = git2::PushOptions::new();
+                push_opts.remote_callbacks(callbacks);
+                let refspec = format!("refs/heads/{0}:refs/heads/{0}", branch);
+                remote.push(&[refspec.as_str()], Some(&mut push_opts))?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
     }
 
     fn do_git_pull(&mut self) {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
-        self.pending_git_op = Some((
-            "git".into(),
-            vec!["-C".into(), git_root.to_string_lossy().into_owned(), "pull".into()],
-        ));
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let branch = repo
+                    .head()?
+                    .shorthand()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "main".into());
+                let mut remote = repo.find_remote("origin")?;
+                let mut callbacks = git2::RemoteCallbacks::new();
+                callbacks.credentials(git2_cred_callback);
+                let mut fetch_opts = git2::FetchOptions::new();
+                fetch_opts.remote_callbacks(callbacks);
+                remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
+
+                let fetch_head = repo.find_reference("FETCH_HEAD")?;
+                let fetch_commit = repo.reference_to_annotated_commit(&fetch_head)?;
+                let (analysis, _) = repo.merge_analysis(&[&fetch_commit])?;
+
+                if analysis.is_up_to_date() {
+                    return Ok(());
+                }
+                if analysis.is_fast_forward() {
+                    let refname = format!("refs/heads/{}", branch);
+                    let mut reference = repo.find_reference(&refname)?;
+                    reference.set_target(fetch_commit.id(), "pull: Fast-forward")?;
+                    repo.set_head(&refname)?;
+                    repo.checkout_head(Some(
+                        git2::build::CheckoutBuilder::default().force(),
+                    ))?;
+                } else {
+                    return Err(git2::Error::from_str(
+                        "pull requires a merge commit — not supported here",
+                    ));
+                }
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
     }
 }
 
@@ -1317,14 +1418,48 @@ fn draw_git_status_bar(
 }
 
 fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut cur = Some(start);
-    while let Some(dir) = cur {
-        if dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
-        }
-        cur = dir.parent();
+    git2::Repository::discover(start)
+        .ok()
+        .and_then(|r| r.workdir().map(|p| p.to_path_buf()))
+}
+
+fn git2_cred_callback(
+    _url: &str,
+    username: Option<&str>,
+    allowed: git2::CredentialType,
+) -> Result<git2::Cred, git2::Error> {
+    if allowed.contains(git2::CredentialType::SSH_KEY) {
+        git2::Cred::ssh_key_from_agent(username.unwrap_or("git"))
+    } else if allowed.contains(git2::CredentialType::DEFAULT) {
+        git2::Cred::default()
+    } else {
+        Err(git2::Error::from_str("no supported credential type"))
     }
-    None
+}
+
+fn git_op_result(
+    result: Result<Result<(), git2::Error>, tokio::task::JoinError>,
+    tx: &tokio::sync::mpsc::UnboundedSender<Action>,
+) {
+    match result {
+        Ok(Ok(())) => { let _ = tx.send(Action::GitOpCompleted); }
+        Ok(Err(e)) => { let _ = tx.send(Action::OpError(e.to_string())); }
+        Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
+    }
+}
+
+fn draw_commit_textarea(frame: &mut Frame, area: Rect, ta: &mut TextArea<'static>) {
+    let popup = centered_rect(70, 50, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(&*ta, popup);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let w = area.width * percent_x / 100;
+    let h = area.height * percent_y / 100;
+    let x = area.x + (area.width - w) / 2;
+    let y = area.y + (area.height - h) / 2;
+    Rect::new(x, y, w, h)
 }
 
 // --- Git file watcher ---
