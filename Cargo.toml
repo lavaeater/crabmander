@@ -41,6 +41,7 @@ tracing = "0.1.40"
 tracing-error = "0.2.0"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde"] }
 opaline = "0.4.0"
+notify = { version = "7", features = ["macos_kqueue"] }
 
 [build-dependencies]
 anyhow = "1.0.90"

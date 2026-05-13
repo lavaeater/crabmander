@@ -49,6 +49,7 @@ pub struct App {
     /// Git command to run with TUI suspended; after exit, reloads git status.
     pending_git_op: Option<(String, Vec<String>)>,
     git_view: Option<GitView>,
+    git_watcher: Option<tokio_util::sync::CancellationToken>,
     recent_dirs: Vec<std::path::PathBuf>,
     should_quit: bool,
     should_suspend: bool,
@@ -89,6 +90,7 @@ impl App {
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
             pending_git_op: None,
             git_view: None,
+            git_watcher: None,
             recent_dirs: recent_dirs::load(&get_data_dir()),
             should_quit: false,
             should_suspend: false,
@@ -1137,13 +1139,17 @@ impl App {
         let branch = panel.git_branch.clone().unwrap_or_default();
         let Some(git_root) = find_git_root(&panel.path) else { return };
         let gv = GitView::new(git_root.clone(), branch);
-        GitView::load_status(git_root, self.action_tx.clone());
+        GitView::load_status(git_root.clone(), self.action_tx.clone());
         self.git_view = Some(gv);
         self.mode = Mode::Git;
         self.last_error = None;
+        self.git_watcher = Some(start_git_watcher(git_root, self.action_tx.clone()));
     }
 
     fn exit_git_mode(&mut self) {
+        if let Some(token) = self.git_watcher.take() {
+            token.cancel();
+        }
         self.mode = Mode::Normal;
         self.git_view = None;
         // Reload both panels in case git ops changed the filesystem.
@@ -1319,6 +1325,54 @@ fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
         cur = dir.parent();
     }
     None
+}
+
+// --- Git file watcher ---
+
+fn start_git_watcher(
+    git_root: std::path::PathBuf,
+    tx: mpsc::UnboundedSender<Action>,
+) -> tokio_util::sync::CancellationToken {
+    use notify::{RecursiveMode, Watcher, recommended_watcher};
+    use std::sync::mpsc as std_mpsc;
+    use std::time::{Duration, Instant};
+
+    let token = tokio_util::sync::CancellationToken::new();
+    let token_clone = token.clone();
+
+    std::thread::spawn(move || {
+        let (std_tx, std_rx) = std_mpsc::channel();
+        let Ok(mut watcher) = recommended_watcher(std_tx) else { return };
+        if watcher.watch(&git_root, RecursiveMode::Recursive).is_err() { return };
+
+        // Debounce: wait until 200 ms of silence before firing GitReload.
+        const DEBOUNCE: Duration = Duration::from_millis(200);
+        let mut pending: Option<Instant> = None;
+
+        loop {
+            if token_clone.is_cancelled() { break; }
+
+            // Non-blocking drain of all available events.
+            loop {
+                match std_rx.try_recv() {
+                    Ok(_) => { pending = Some(Instant::now()); }
+                    Err(std_mpsc::TryRecvError::Empty) => break,
+                    Err(std_mpsc::TryRecvError::Disconnected) => return,
+                }
+            }
+
+            if let Some(t) = pending {
+                if t.elapsed() >= DEBOUNCE {
+                    pending = None;
+                    let _ = tx.send(Action::GitReload);
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+
+    token
 }
 
 // --- QuickCd helpers ---

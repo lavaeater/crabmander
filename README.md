@@ -54,70 +54,70 @@ afterward to hardcode your preferred terminal if needed.
 
 ### Navigation
 
-| Key | Action |
-|-----|--------|
-| `↑` / `k` | Move cursor up |
-| `↓` / `j` | Move cursor down |
-| `Page Up` | Page up |
-| `Page Down` | Page down |
-| `Home` | Jump to first entry |
-| `End` | Jump to last entry |
-| `Enter` / `→` | Enter directory; open file with `xdg-open` |
-| `Backspace` / `←` | Go to parent directory |
-| `Tab` | Switch active panel |
-| `Shift+Tab` | Make the other panel navigate to the active panel's directory |
+| Key               | Action                                                        |
+|-------------------|---------------------------------------------------------------|
+| `↑` / `k`         | Move cursor up                                                |
+| `↓` / `j`         | Move cursor down                                              |
+| `Page Up`         | Page up                                                       |
+| `Page Down`       | Page down                                                     |
+| `Home`            | Jump to first entry                                           |
+| `End`             | Jump to last entry                                            |
+| `Enter` / `→`     | Enter directory; open file with `xdg-open`                    |
+| `Backspace` / `←` | Go to parent directory                                        |
+| `Tab`             | Switch active panel                                           |
+| `Shift+Tab`       | Make the other panel navigate to the active panel's directory |
 
 ### Marking files
 
 Marks determine which files are acted on by Copy, Move, and Delete. If nothing
 is marked, those operations act on the entry under the cursor.
 
-| Key | Action |
-|-----|--------|
+| Key                | Action                                         |
+|--------------------|------------------------------------------------|
 | `Space` / `Insert` | Toggle mark on cursor entry and advance cursor |
-| `*` | Toggle mark on all entries in the panel |
+| `*`                | Toggle mark on all entries in the panel        |
 
 Marked files are shown in yellow with a `*` prefix. The status bar shows the
 marked count and cumulative size.
 
 ### Function keys
 
-| Key | Action |
-|-----|--------|
-| `F1` | **Quick CD** — incremental directory navigator (see below) |
-| `F2` | **Context menu** — file-type-aware actions (see below) |
-| `F3` | **Nano** — open a file in nano |
-| `F4` | **Sizes** — recursively calculate directory sizes; auto-sorts by size descending |
-| `F5` | **Copy** — copy marked/cursor files to the other panel's directory |
-| `F6` | **Move** — move marked/cursor files to the other panel's directory |
-| `F7` | **MkDir** — create a new directory in the active panel |
-| `F8` | **Delete** — delete marked/cursor files (with confirmation) |
-| `F9` | **Sort** — cycle sort column: Name → Size → Modified |
-| `Shift+F9` | **Invert sort** — toggle ascending ↑ / descending ↓ |
-| `F10` / `q` | Quit |
-| `Ctrl+Z` | Suspend to background |
+| Key         | Action                                                                           |
+|-------------|----------------------------------------------------------------------------------|
+| `F1`        | **Quick CD** — incremental directory navigator (see below)                       |
+| `F2`        | **Context menu** — file-type-aware actions (see below)                           |
+| `F3`        | **Nano** — open a file in nano                                                   |
+| `F4`        | **Sizes** — recursively calculate directory sizes; auto-sorts by size descending |
+| `F5`        | **Copy** — copy marked/cursor files to the other panel's directory               |
+| `F6`        | **Move** — move marked/cursor files to the other panel's directory               |
+| `F7`        | **MkDir** — create a new directory in the active panel                           |
+| `F8`        | **Delete** — delete marked/cursor files (with confirmation)                      |
+| `F9`        | **Sort** — cycle sort column: Name → Size → Modified                             |
+| `Shift+F9`  | **Invert sort** — toggle ascending ↑ / descending ↓                              |
+| `F10` / `q` | Quit                                                                             |
+| `Ctrl+Z`    | Suspend to background                                                            |
 
 ### Quick CD (F1)
 
 Opens an incremental directory navigator. Start typing and the list filters in
 real time.
 
-| Key | Action |
-|-----|--------|
-| _any text_ | Filter directories; `~` expands to your home directory |
-| `↑` / `↓` | Navigate the filtered list |
-| `Tab` | Complete the selected entry into the input and drill deeper |
-| `Enter` | Navigate the active panel to the selected directory |
-| `Esc` | Cancel |
+| Key        | Action                                                      |
+|------------|-------------------------------------------------------------|
+| _any text_ | Filter directories; `~` expands to your home directory      |
+| `↑` / `↓`  | Navigate the filtered list                                  |
+| `Tab`      | Complete the selected entry into the input and drill deeper |
+| `Enter`    | Navigate the active panel to the selected directory         |
+| `Esc`      | Cancel                                                      |
 
 **Examples:**
 
-| Input | Lists |
-|-------|-------|
-| _(empty)_ | Subdirectories of the current panel |
-| `doc` | Subdirectories whose name contains `doc` |
-| `~/pro` | Subdirectories of `$HOME` containing `pro` |
-| `/usr/lo` | Subdirectories of `/usr` containing `lo` |
+| Input            | Lists                                             |
+|------------------|---------------------------------------------------|
+| _(empty)_        | Subdirectories of the current panel               |
+| `doc`            | Subdirectories whose name contains `doc`          |
+| `~/pro`          | Subdirectories of `$HOME` containing `pro`        |
+| `/usr/lo`        | Subdirectories of `/usr` containing `lo`          |
 | `/home/` + `Tab` | Drills into `/home/` and lists its subdirectories |
 
 ### Context menu (F2)
@@ -125,11 +125,11 @@ real time.
 Shows context-aware actions for the file under the cursor. Navigate with
 `↑` / `↓`, confirm with `Enter`, cancel with `Esc`.
 
-| File type | Available actions |
-|-----------|------------------|
-| Any file | Open with OS (`xdg-open`), Run VS Code here |
-| Archives (`.zip`, `.tar.*`, `.7z`, `.rar`, …) | Extract here, Extract to other panel |
-| Executable files | Execute… (prompts for arguments, then runs in terminal) |
+| File type                                     | Available actions                                       |
+|-----------------------------------------------|---------------------------------------------------------|
+| Any file                                      | Open with OS (`xdg-open`), Run VS Code here             |
+| Archives (`.zip`, `.tar.*`, `.7z`, `.rar`, …) | Extract here, Extract to other panel                    |
+| Executable files                              | Execute… (prompts for arguments, then runs in terminal) |
 
 ### Auto-filter
 
@@ -138,11 +138,11 @@ on the active panel. The panel narrows to entries whose names contain the typed
 text (case-insensitive). The active filter is shown in a yellow bar inside the
 panel border.
 
-| Key | Action |
-|-----|--------|
-| _printable key_ | Append to filter |
-| `Backspace` | Remove last filter character |
-| `Esc` | Clear filter |
+| Key             | Action                       |
+|-----------------|------------------------------|
+| _printable key_ | Append to filter             |
+| `Backspace`     | Remove last filter character |
+| `Esc`           | Clear filter                 |
 
 The filter clears automatically when you navigate into a new directory.
 
@@ -175,9 +175,9 @@ CRABMANDER_DATA=~/.local/share/crabmander crabmander
 
 ### Key sequence syntax
 
-| Syntax | Meaning |
-|--------|---------|
-| `<q>` | The `q` key |
-| `<ctrl-a>` | Ctrl+A |
-| `<shift-f9>` | Shift+F9 |
-| `<g><g>` | Two-key sequence `gg` |
+| Syntax       | Meaning               |
+|--------------|-----------------------|
+| `<q>`        | The `q` key           |
+| `<ctrl-a>`   | Ctrl+A                |
+| `<shift-f9>` | Shift+F9              |
+| `<g><g>`     | Two-key sequence `gg` |
