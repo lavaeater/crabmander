@@ -4,6 +4,7 @@ use crate::palette::Palette;
 
 const NORMAL_KEYS: &[(&str, &str)] = &[
     ("F1", "QuickCD"),
+    ("⇧F1", "Recent"),
     ("F2", "Menu"),
     ("F3", "Nano"),
     ("F4", "Sizes"),

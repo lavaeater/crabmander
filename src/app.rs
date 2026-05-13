@@ -15,8 +15,9 @@ use crate::{
             is_executable,
         },
     },
-    config::Config,
+    config::{Config, get_data_dir},
     palette::Palette,
+    recent_dirs,
     tui::{Event, Tui},
 };
 
@@ -48,6 +49,7 @@ pub struct App {
     /// Git command to run with TUI suspended; after exit, reloads git status.
     pending_git_op: Option<(String, Vec<String>)>,
     git_view: Option<GitView>,
+    recent_dirs: Vec<std::path::PathBuf>,
     should_quit: bool,
     should_suspend: bool,
     last_tick_key_events: Vec<KeyEvent>,
@@ -87,6 +89,7 @@ impl App {
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
             pending_git_op: None,
             git_view: None,
+            recent_dirs: recent_dirs::load(&get_data_dir()),
             should_quit: false,
             should_suspend: false,
             last_tick_key_events: Vec::new(),
@@ -464,6 +467,7 @@ impl App {
                 }
 
                 Action::SelectTheme => self.open_theme_selector(),
+                Action::RecentDirs => self.open_recent_dirs_menu(),
 
                 // Git mode
                 Action::EnterGitMode => self.enter_git_mode(),
@@ -677,6 +681,24 @@ impl App {
         ));
     }
 
+    fn open_recent_dirs_menu(&mut self) {
+        if self.recent_dirs.is_empty() {
+            self.last_error = Some("No recent directories — use F1 to navigate first".into());
+            return;
+        }
+        let items: Vec<MenuItem> = self
+            .recent_dirs
+            .iter()
+            .map(|p| {
+                MenuItem::new(
+                    p.to_string_lossy().into_owned(),
+                    MenuAction::CdTo(p.clone()),
+                )
+            })
+            .collect();
+        self.open_dialog(DialogState::context_menu("Recent Directories", items));
+    }
+
     fn open_theme_selector(&mut self) {
         let current = self.config.theme.clone();
         let mut names: Vec<(&'static str, &'static str)> =
@@ -836,6 +858,8 @@ impl App {
             } => {
                 self.mode = Mode::Normal;
                 let dest = quick_cd_destination(&input, &matches, selected, &base_path);
+                recent_dirs::push(&mut self.recent_dirs, dest.clone());
+                recent_dirs::save(&get_data_dir(), &self.recent_dirs);
                 let side = self.active;
                 Panel::load_dir(dest, side, self.action_tx.clone());
             }
@@ -909,6 +933,10 @@ impl App {
                         }
                     }
                 });
+            }
+            MenuAction::CdTo(path) => {
+                let side = self.active;
+                Panel::load_dir(path, side, self.action_tx.clone());
             }
             MenuAction::SetTheme(id) => {
                 if let Some(theme) = opaline::builtins::load_by_name(&id) {

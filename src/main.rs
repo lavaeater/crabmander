@@ -11,6 +11,7 @@ mod config;
 mod errors;
 mod logging;
 mod palette;
+mod recent_dirs;
 mod tui;
 
 #[tokio::main]

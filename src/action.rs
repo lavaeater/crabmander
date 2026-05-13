@@ -167,7 +167,8 @@ pub enum Action {
     DialogConfirm,
     DialogCancel,
 
-    SelectTheme, // F11
+    SelectTheme,  // F11
+    RecentDirs,   // Shift-F1
 
     // Git mode
     EnterGitMode,

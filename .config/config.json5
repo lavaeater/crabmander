@@ -29,6 +29,7 @@
 
       // Operations
       "<f1>": "QuickCd",
+      "<shift-f1>": "RecentDirs",
       "<f2>": "ContextMenu",
       "<f3>": "View",
       "<f4>": "CalcSizes",

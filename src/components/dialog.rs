@@ -30,6 +30,7 @@ pub enum MenuAction {
     UnmountDevice { device: String },
     Chown { paths: Vec<PathBuf>, current_owner: String, reload_sides: Vec<crate::action::Side> },
     SetTheme(String),
+    CdTo(std::path::PathBuf),
 }
 
 #[derive(Debug, Clone)]
