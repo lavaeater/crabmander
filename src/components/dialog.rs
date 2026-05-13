@@ -29,6 +29,8 @@ pub enum MenuAction {
     MountDevice { device: String },
     UnmountDevice { device: String },
     Chown { paths: Vec<PathBuf>, current_owner: String, reload_sides: Vec<crate::action::Side> },
+    SetTheme(String),
+    CdTo(std::path::PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -172,14 +174,14 @@ impl DialogState {
 
 // --- Rendering ---
 
-pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
+pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate::palette::Palette) {
     match dialog {
         DialogState::Confirm { title, message, .. } => {
             let popup = centered_rect(64, 8, area);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_style(palette.dlg_confirm)
                 .title(format!(" {} ", title));
             let text = format!("\n{}\n\n[ Yes / Enter ]   [ No / Esc ]", message);
             let para = Paragraph::new(text)
@@ -189,17 +191,12 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             frame.render_widget(para, popup);
         }
 
-        DialogState::Input {
-            title,
-            prompt,
-            value,
-            ..
-        } => {
+        DialogState::Input { title, prompt, value, .. } => {
             let popup = centered_rect(64, 8, area);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(palette.dlg_input)
                 .title(format!(" {} ", title));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
@@ -213,12 +210,11 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             .areas(inner);
 
             frame.render_widget(
-                Paragraph::new(prompt.as_str())
-                    .style(Style::default().add_modifier(Modifier::BOLD)),
+                Paragraph::new(prompt.as_str()).style(Style::default().add_modifier(Modifier::BOLD)),
                 prompt_area,
             );
             frame.render_widget(
-                Paragraph::new(format!("{}_", value)).style(Style::default().fg(Color::White)),
+                Paragraph::new(format!("{}_", value)),
                 value_area,
             );
             frame.render_widget(
@@ -229,12 +225,7 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             );
         }
 
-        DialogState::QuickCd {
-            input,
-            matches,
-            selected,
-            ..
-        } => {
+        DialogState::QuickCd { input, matches, selected, .. } => {
             let height = (matches.len() as u16 + 6)
                 .clamp(10, 24)
                 .min(area.height.saturating_sub(2));
@@ -243,7 +234,7 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Magenta))
+                .border_style(palette.dlg_qcd)
                 .title(" Quick CD ");
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
@@ -256,24 +247,17 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             ])
             .areas(inner);
 
-            // Input line
             frame.render_widget(
-                Paragraph::new(format!("{}_", input)).style(
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                Paragraph::new(format!("{}_", input))
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 input_area,
             );
-
-            // Separator
             frame.render_widget(
                 Paragraph::new("─".repeat(inner.width as usize))
                     .style(Style::default().add_modifier(Modifier::DIM)),
                 sep_area,
             );
 
-            // Match list
             let list_items: Vec<ListItem> = matches
                 .iter()
                 .enumerate()
@@ -281,7 +265,7 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
                     let style = if i == *selected {
                         Style::default().add_modifier(Modifier::REVERSED)
                     } else {
-                        Style::default().fg(Color::Cyan)
+                        palette.entry_dir
                     };
                     ListItem::new(format!(" {}/", name)).style(style)
                 })
@@ -293,7 +277,6 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             }
             frame.render_stateful_widget(List::new(list_items), list_area, &mut list_state);
 
-            // Hint
             frame.render_widget(
                 Paragraph::new("↑↓ select   Tab complete   ↵ cd   Esc cancel")
                     .alignment(Alignment::Center)
@@ -302,18 +285,14 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
             );
         }
 
-        DialogState::ContextMenu {
-            title,
-            items,
-            selected,
-        } => {
+        DialogState::ContextMenu { title, items, selected } => {
             let height = (items.len() as u16 + 4).min(area.height.saturating_sub(2));
             let popup = centered_rect(50, height, area);
             frame.render_widget(Clear, popup);
 
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Green))
+                .border_style(palette.dlg_menu)
                 .title(format!(" {} ", title));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
@@ -333,15 +312,10 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
 
             let mut state = ListState::default();
             state.select(Some(*selected));
-
             frame.render_stateful_widget(List::new(list_items), inner, &mut state);
         }
 
-        DialogState::ErrorList {
-            title,
-            errors,
-            scroll,
-        } => {
+        DialogState::ErrorList { title, errors, scroll } => {
             let visible_lines = 10u16;
             let height = (visible_lines + 4).min(area.height.saturating_sub(2));
             let popup = centered_rect(72, height, area);
@@ -349,25 +323,19 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect) {
 
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red))
+                .border_style(palette.dlg_error)
                 .title(format!(" {} ", title));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
 
-            let [list_area, hint_area] = Layout::vertical([
-                Constraint::Min(0),
-                Constraint::Length(1),
-            ])
-            .areas(inner);
+            let [list_area, hint_area] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
 
             let list_items: Vec<ListItem> = errors
                 .iter()
                 .skip(*scroll)
                 .take(list_area.height as usize)
-                .map(|msg| {
-                    ListItem::new(format!(" {}", msg))
-                        .style(Style::default().fg(Color::LightRed))
-                })
+                .map(|msg| ListItem::new(format!(" {}", msg)).style(palette.status_error))
                 .collect();
 
             frame.render_widget(List::new(list_items), list_area);

@@ -21,7 +21,7 @@ pub struct AppConfig {
     pub config_dir: PathBuf,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     #[serde(default, flatten)]
     pub config: AppConfig,
@@ -29,6 +29,24 @@ pub struct Config {
     pub keybindings: KeyBindings,
     #[serde(default)]
     pub styles: Styles,
+    /// Opaline theme name (kebab-case). Run `crabmander --list-themes` to see options.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            config: AppConfig::default(),
+            keybindings: KeyBindings::default(),
+            styles: Styles::default(),
+            theme: default_theme(),
+        }
+    }
+}
+
+fn default_theme() -> String {
+    "catppuccin-mocha".into()
 }
 
 lazy_static! {
