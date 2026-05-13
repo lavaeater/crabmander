@@ -7,7 +7,7 @@ use ratatui::{
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
 
-use crate::action::{Action, GitEntry, GitIndexStatus, GitWorktreeStatus};
+use crate::action::{Action, BranchInfo, GitEntry, GitIndexStatus, GitWorktreeStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitPane {
@@ -230,6 +230,86 @@ impl GitView {
                 }
                 Err(e) => {
                     info!("spawn_blocking error: {}", e);
+                }
+            }
+        });
+    }
+
+    // --- Branch listing ---
+
+    pub fn load_branches(git_root: PathBuf, tx: UnboundedSender<Action>) {
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+
+                let current = repo
+                    .head()
+                    .ok()
+                    .and_then(|h| h.shorthand().map(str::to_owned));
+
+                // Collect local branch names.
+                let mut local_names: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                let mut branches: Vec<BranchInfo> = Vec::new();
+
+                for item in repo.branches(Some(git2::BranchType::Local))? {
+                    let (branch, _) = item?;
+                    let Some(name) = branch.name()?.map(str::to_owned) else {
+                        continue;
+                    };
+                    let is_current = current.as_deref() == Some(&name);
+                    local_names.insert(name.clone());
+                    branches.push(BranchInfo {
+                        name,
+                        is_local: true,
+                        is_current,
+                        remote_ref: None,
+                    });
+                }
+
+                // Sort local: current first, then alphabetical.
+                branches.sort_by(|a, b| {
+                    b.is_current.cmp(&a.is_current).then(a.name.cmp(&b.name))
+                });
+
+                // Remote branches that have no local counterpart.
+                let mut remote_branches: Vec<BranchInfo> = Vec::new();
+                for item in repo.branches(Some(git2::BranchType::Remote))? {
+                    let (branch, _) = item?;
+                    let Some(full_name) = branch.name()?.map(str::to_owned) else {
+                        continue;
+                    };
+                    if full_name.ends_with("/HEAD") {
+                        continue;
+                    }
+                    // Strip the remote prefix (e.g. "origin/") to get the short name.
+                    let short = full_name.split_once('/').map(|x| x.1).unwrap_or(&full_name);
+                    if local_names.contains(short) {
+                        continue;
+                    }
+                    remote_branches.push(BranchInfo {
+                        name: short.to_owned(),
+                        is_local: false,
+                        is_current: false,
+                        remote_ref: Some(full_name),
+                    });
+                }
+                remote_branches.sort_by(|a, b| a.name.cmp(&b.name));
+                branches.extend(remote_branches);
+
+                Ok::<_, git2::Error>(branches)
+            })
+            .await;
+
+            match result {
+                Ok(Ok(branches)) => {
+                    let _ = tx.send(Action::GitBranchesLoaded { branches });
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(Action::OpError(e.to_string()));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::OpError(e.to_string()));
                 }
             }
         });

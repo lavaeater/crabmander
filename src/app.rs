@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::{
-    action::{Action, Side},
+    action::{Action, BranchInfo, Side},
     components::{
         dialog::{self, DeferredOp, DialogState, MenuAction, MenuItem},
         func_bar,
@@ -29,6 +29,7 @@ pub enum Mode {
     Dialog,
     Git,
     GitCommit,
+    GitBranch,
 }
 
 pub struct App {
@@ -50,6 +51,8 @@ pub struct App {
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
     git_view: Option<GitView>,
     commit_textarea: Option<TextArea<'static>>,
+    branch_list: Vec<BranchInfo>,
+    branch_cursor: usize,
     git_watcher: Option<tokio_util::sync::CancellationToken>,
     recent_dirs: Vec<std::path::PathBuf>,
     should_quit: bool,
@@ -91,6 +94,8 @@ impl App {
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
             git_view: None,
             commit_textarea: None,
+            branch_list: Vec::new(),
+            branch_cursor: 0,
             git_watcher: None,
             recent_dirs: recent_dirs::load(&get_data_dir()),
             should_quit: false,
@@ -214,7 +219,10 @@ impl App {
         if self.mode == Mode::GitCommit {
             match key.code {
                 KeyCode::Esc => tx.send(Action::GitCommitCancel)?,
-                KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Enter
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::ALT) =>
+                {
                     tx.send(Action::GitCommitSubmit)?;
                 }
                 _ => {
@@ -222,6 +230,18 @@ impl App {
                         ta.input(key);
                     }
                 }
+            }
+            return Ok(());
+        }
+
+        if self.mode == Mode::GitBranch {
+            match key.code {
+                KeyCode::Esc => tx.send(Action::ExitGitMode)?,
+                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitBranchNavUp)?,
+                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitBranchNavDown)?,
+                KeyCode::Enter => tx.send(Action::GitBranchConfirm)?,
+                KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
+                _ => {}
             }
             return Ok(());
         }
@@ -238,6 +258,8 @@ impl App {
                 KeyCode::F(3) | KeyCode::Char('c') => tx.send(Action::GitCommit)?,
                 KeyCode::F(4) | KeyCode::Char('p') => tx.send(Action::GitPush)?,
                 KeyCode::F(5) | KeyCode::Char('P') => tx.send(Action::GitPull)?,
+                KeyCode::F(6) | KeyCode::Char('b') => tx.send(Action::GitListBranches)?,
+                KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
                 KeyCode::Char('r') => tx.send(Action::GitReload)?,
                 _ => {}
             }
@@ -497,6 +519,24 @@ impl App {
                 Action::GitCommitCancel => self.cancel_git_commit(),
                 Action::GitPush => self.do_git_push(),
                 Action::GitPull => self.do_git_pull(),
+                Action::GitListBranches => self.do_git_list_branches(),
+                Action::GitNewBranch => self.open_new_branch_dialog(),
+                Action::GitBranchNavUp => {
+                    self.branch_cursor = self.branch_cursor.saturating_sub(1);
+                }
+                Action::GitBranchNavDown => {
+                    let max = self.branch_list.len().saturating_sub(1);
+                    self.branch_cursor = (self.branch_cursor + 1).min(max);
+                }
+                Action::GitBranchConfirm => self.do_git_checkout_branch(),
+                Action::GitBranchesLoaded { branches } => {
+                    self.branch_cursor = branches
+                        .iter()
+                        .position(|b| b.is_current)
+                        .unwrap_or(0);
+                    self.branch_list = branches;
+                    self.mode = Mode::GitBranch;
+                }
                 Action::GitReload | Action::GitOpCompleted => {
                     if let Some(gv) = &self.git_view {
                         GitView::load_status(gv.git_root.clone(), self.action_tx.clone());
@@ -521,8 +561,11 @@ impl App {
         let dialog = &self.dialog;
         let last_error = &self.last_error;
         let git_view = &mut self.git_view;
-        let git_mode = self.mode == Mode::Git || self.mode == Mode::GitCommit;
+        let git_mode = matches!(self.mode, Mode::Git | Mode::GitCommit | Mode::GitBranch);
         let commit_textarea = &mut self.commit_textarea;
+        let branch_list = &self.branch_list;
+        let branch_cursor = self.branch_cursor;
+        let show_branches = self.mode == Mode::GitBranch;
         let palette = &self.palette;
 
         tui.draw(|frame| {
@@ -541,6 +584,9 @@ impl App {
                 }
                 if let Some(ta) = commit_textarea {
                     draw_commit_textarea(frame, panels_area, ta);
+                }
+                if show_branches {
+                    draw_branch_popup(frame, panels_area, branch_list, branch_cursor, palette);
                 }
             } else {
                 let [left_area, right_area] =
@@ -850,9 +896,17 @@ impl App {
                 self.execute_op(op, None);
             }
             DialogState::Input { value, op, .. } => {
-                self.mode = Mode::Normal;
                 self.last_error = None;
-                self.execute_op(op, Some(value));
+                if let DeferredOp::GitCreateBranch { git_root } = op {
+                    let name = value.trim().to_owned();
+                    if !name.is_empty() {
+                        self.mode = Mode::Git;
+                        self.do_git_create_branch(git_root, name);
+                    }
+                } else {
+                    self.mode = Mode::Normal;
+                    self.execute_op(op, Some(value));
+                }
             }
             DialogState::ContextMenu {
                 items, selected, ..
@@ -1049,6 +1103,9 @@ impl App {
                     });
                 }
             }
+
+            // Handled directly in dialog_confirm before execute_op is called.
+            DeferredOp::GitCreateBranch { .. } => {}
         }
     }
 
@@ -1219,8 +1276,10 @@ impl App {
         ta.set_block(
             ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
-                .title(" Commit message — Ctrl+Enter to commit, Esc to cancel "),
+                .title(" Commit message — Ctrl+Enter or Alt+Enter to commit, Esc to cancel "),
         );
+        ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        ta.set_placeholder_text("Summary line\n\nOptional body…");
         self.commit_textarea = Some(ta);
         self.mode = Mode::GitCommit;
     }
@@ -1330,6 +1389,83 @@ impl App {
             git_op_result(result, &tx);
         });
     }
+    fn open_new_branch_dialog(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        // Close the branch picker if open, then show the input dialog.
+        self.branch_list.clear();
+        self.open_dialog(DialogState::input(
+            "New Branch",
+            "Branch name:",
+            String::new(),
+            DeferredOp::GitCreateBranch { git_root },
+        ));
+    }
+
+    fn do_git_create_branch(&mut self, git_root: std::path::PathBuf, name: String) {
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let head_commit = repo.head()?.peel_to_commit()?;
+                let mut branch = repo.branch(&name, &head_commit, false)?;
+                // Set upstream to origin/<name> if origin exists.
+                if repo.find_remote("origin").is_ok() {
+                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                }
+                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                repo.checkout_tree(&obj, None)?;
+                repo.set_head(&format!("refs/heads/{}", name))?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+
+    fn do_git_list_branches(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        GitView::load_branches(gv.git_root.clone(), self.action_tx.clone());
+    }
+
+    fn do_git_checkout_branch(&mut self) {
+        let Some(info) = self.branch_list.get(self.branch_cursor).cloned() else { return };
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        self.mode = Mode::Git;
+        self.branch_list.clear();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                if info.is_local {
+                    // Checkout existing local branch.
+                    let obj =
+                        repo.revparse_single(&format!("refs/heads/{}", info.name))?;
+                    repo.checkout_tree(&obj, None)?;
+                    repo.set_head(&format!("refs/heads/{}", info.name))?;
+                } else {
+                    // Remote-only: create a local tracking branch then checkout.
+                    let remote_ref_owned = info
+                        .remote_ref
+                        .clone()
+                        .unwrap_or_else(|| format!("origin/{}", info.name));
+                    let remote_branch =
+                        repo.find_branch(&remote_ref_owned, git2::BranchType::Remote)?;
+                    let commit = remote_branch.get().peel_to_commit()?;
+                    let mut local = repo.branch(&info.name, &commit, false)?;
+                    local.set_upstream(Some(&remote_ref_owned))?;
+                    let obj =
+                        repo.revparse_single(&format!("refs/heads/{}", info.name))?;
+                    repo.checkout_tree(&obj, None)?;
+                    repo.set_head(&format!("refs/heads/{}", info.name))?;
+                }
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
 }
 
 // --- Status bar ---
@@ -1404,7 +1540,7 @@ fn draw_git_status_bar(
     }
 
     let left = format!(" Git: {}  [{}]", gv.git_root.display(), gv.branch);
-    let hint = " ^G exit  a/F1 stage  u/F2 unstage  c/F3 commit  p push  P pull  r reload ";
+    let hint = " ^G exit  F1 stage  F2 unstage  F3 commit  p push  P pull  F6 branches  n new-branch  r reload ";
     let hint_w = hint.len() as u16;
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hint_w)]).areas(area);
@@ -1454,6 +1590,66 @@ fn draw_commit_textarea(frame: &mut Frame, area: Rect, ta: &mut TextArea<'static
     frame.render_widget(&*ta, popup);
 }
 
+fn draw_branch_popup(
+    frame: &mut Frame,
+    area: Rect,
+    branches: &[BranchInfo],
+    cursor: usize,
+    palette: &Palette,
+) {
+    use ratatui::widgets::{Block, Borders, List, ListItem};
+
+    let popup = centered_rect(60, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(palette.border_active)
+        .title(" Switch Branch — Enter checkout  n new  Esc cancel ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    // Leave one line at the bottom for a local/remote legend.
+    let list_h = inner.height.saturating_sub(1) as usize;
+    let offset = if cursor < list_h { 0 } else { cursor + 1 - list_h };
+
+    let items: Vec<ListItem> = branches
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_h)
+        .map(|(i, b)| {
+            let marker = if b.is_current { ">" } else { " " };
+            let locality = if b.is_local { "local " } else { "remote" };
+            let label = format!(" {} [{locality}] {}", marker, b.name);
+            let style = if i == cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else if b.is_current {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    let legend_area = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    use ratatui::widgets::Paragraph;
+    frame.render_widget(
+        Paragraph::new("  > current  [local] local branch  [remote] remote-only")
+            .style(Style::default().add_modifier(Modifier::DIM)),
+        legend_area,
+    );
+
+    let list_area = Rect { height: list_h as u16, ..inner };
+    frame.render_widget(List::new(items), list_area);
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let w = area.width * percent_x / 100;
     let h = area.height * percent_y / 100;
@@ -1496,11 +1692,11 @@ fn start_git_watcher(
                 }
             }
 
-            if let Some(t) = pending {
-                if t.elapsed() >= DEBOUNCE {
-                    pending = None;
-                    let _ = tx.send(Action::GitReload);
-                }
+            if let Some(t) = pending
+                && t.elapsed() >= DEBOUNCE
+            {
+                pending = None;
+                let _ = tx.send(Action::GitReload);
             }
 
             std::thread::sleep(Duration::from_millis(50));

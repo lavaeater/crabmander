@@ -16,6 +16,7 @@ pub enum DeferredOp {
     Execute { path: PathBuf },
     OpenInNano { base: PathBuf },
     ChownFiles { paths: Vec<PathBuf>, reload_sides: Vec<crate::action::Side> },
+    GitCreateBranch { git_root: PathBuf },
 }
 
 // --- Context menu ---

@@ -185,11 +185,32 @@ pub enum Action {
     GitPush,
     GitPull,
     GitReload,
+    GitListBranches,
+    GitNewBranch,
+    GitBranchNavUp,
+    GitBranchNavDown,
+    GitBranchConfirm,
     #[strum(to_string = "GitStatusLoaded")]
     GitStatusLoaded {
         git_root: PathBuf,
         branch: String,
         entries: Vec<GitEntry>,
     },
+    #[strum(to_string = "GitBranchesLoaded")]
+    GitBranchesLoaded {
+        branches: Vec<BranchInfo>,
+    },
     GitOpCompleted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchInfo {
+    /// Short display name (e.g. "main" or "feature/foo").
+    pub name: String,
+    /// Whether a local branch with this name exists.
+    pub is_local: bool,
+    /// Whether this is the currently checked-out branch.
+    pub is_current: bool,
+    /// For remote-only branches: the canonical remote ref (e.g. "origin/foo").
+    pub remote_ref: Option<String>,
 }

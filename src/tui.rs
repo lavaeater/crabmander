@@ -10,7 +10,9 @@ use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind, MouseEvent,
+        Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind,
+        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -51,6 +53,7 @@ pub struct Tui {
     pub tick_rate: f64,
     pub mouse: bool,
     pub paste: bool,
+    keyboard_enhanced: bool,
 }
 
 impl Tui {
@@ -66,6 +69,7 @@ impl Tui {
             tick_rate: 4.0,
             mouse: false,
             paste: false,
+            keyboard_enhanced: false,
         })
     }
 
@@ -172,6 +176,18 @@ impl Tui {
         if self.paste {
             crossterm::execute!(stdout(), EnableBracketedPaste)?;
         }
+        // Enable keyboard enhancement so Ctrl+Enter is distinguishable from Enter.
+        // Supported by kitty, foot, WezTerm, and other modern terminals; silently
+        // ignored on others (the terminal may not respond, but won't break).
+        if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+            let _ = crossterm::execute!(
+                stdout(),
+                PushKeyboardEnhancementFlags(
+                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+                )
+            );
+            self.keyboard_enhanced = true;
+        }
         self.start();
         Ok(())
     }
@@ -180,6 +196,10 @@ impl Tui {
         self.stop()?;
         if crossterm::terminal::is_raw_mode_enabled()? {
             self.flush()?;
+            if self.keyboard_enhanced {
+                let _ = crossterm::execute!(stdout(), PopKeyboardEnhancementFlags);
+                self.keyboard_enhanced = false;
+            }
             if self.paste {
                 crossterm::execute!(stdout(), DisableBracketedPaste)?;
             }
