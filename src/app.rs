@@ -1565,7 +1565,21 @@ fn git2_cred_callback(
     allowed: git2::CredentialType,
 ) -> Result<git2::Cred, git2::Error> {
     if allowed.contains(git2::CredentialType::SSH_KEY) {
-        git2::Cred::ssh_key_from_agent(username.unwrap_or("git"))
+        let user = username.unwrap_or("git");
+        if std::env::var_os("SSH_AUTH_SOCK").is_some() {
+            if let Ok(cred) = git2::Cred::ssh_key_from_agent(user) {
+                return Ok(cred);
+            }
+        }
+        // Fall back to key files in ~/.ssh
+        let home = std::env::var("HOME").unwrap_or_default();
+        for key_name in &["id_ed25519", "id_rsa", "id_ecdsa"] {
+            let privkey = std::path::Path::new(&home).join(".ssh").join(key_name);
+            if privkey.exists() {
+                return git2::Cred::ssh_key(user, None, &privkey, None);
+            }
+        }
+        Err(git2::Error::from_str("no SSH key found"))
     } else if allowed.contains(git2::CredentialType::DEFAULT) {
         git2::Cred::default()
     } else {
