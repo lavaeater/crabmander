@@ -463,6 +463,8 @@ impl App {
                     }
                 }
 
+                Action::SelectTheme => self.open_theme_selector(),
+
                 // Git mode
                 Action::EnterGitMode => self.enter_git_mode(),
                 Action::ExitGitMode => self.exit_git_mode(),
@@ -673,6 +675,27 @@ impl App {
             prefill,
             DeferredOp::OpenInNano { base },
         ));
+    }
+
+    fn open_theme_selector(&mut self) {
+        let current = self.config.theme.clone();
+        let mut names: Vec<(&'static str, &'static str)> =
+            opaline::builtins::builtin_names().to_vec();
+        names.sort_by_key(|(_, display)| *display);
+
+        let items: Vec<MenuItem> = names
+            .into_iter()
+            .map(|(id, display)| {
+                let label = if id == current.as_str() {
+                    format!("{} ✓", display)
+                } else {
+                    display.to_string()
+                };
+                MenuItem::new(label, MenuAction::SetTheme(id.to_string()))
+            })
+            .collect();
+
+        self.open_dialog(DialogState::context_menu("Select Theme", items));
     }
 
     fn open_context_menu(&mut self) {
@@ -886,6 +909,12 @@ impl App {
                         }
                     }
                 });
+            }
+            MenuAction::SetTheme(id) => {
+                if let Some(theme) = opaline::builtins::load_by_name(&id) {
+                    self.palette = Palette::from(&theme);
+                    self.config.theme = id;
+                }
             }
             MenuAction::UnmountDevice { device } => {
                 let tx = self.action_tx.clone();

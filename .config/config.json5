@@ -38,6 +38,7 @@
       "<f6>": "Move",
       "<f7>": "Mkdir",
       "<f8>": "Delete",
+      "<f11>": "SelectTheme",
     },
   }
 }

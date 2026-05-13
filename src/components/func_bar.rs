@@ -13,6 +13,7 @@ const NORMAL_KEYS: &[(&str, &str)] = &[
     ("F8", "Delete"),
     ("F9", "Sort"),
     ("F10", "Quit"),
+    ("F11", "Theme"),
 ];
 
 const GIT_KEYS: &[(&str, &str)] = &[
