@@ -59,7 +59,7 @@ need_stdout = true
 
 [jobs.nextest]
 command = [
-    "cargo", "nextest", "run",
+    "cargo", "llvm-cov", "nextest",
     "--hide-progress-bar", "--failure-output", "final"
 ]
 need_stdout = true
