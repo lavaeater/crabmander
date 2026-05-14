@@ -24,6 +24,7 @@ const GIT_KEYS: &[(&str, &str)] = &[
     ("F4", "Push"),
     ("F5", "Pull"),
     ("F6", "Branches"),
+    ("F7", "All+Commit"),
     ("n", "NewBranch"),
     ("Tab", "Pane"),
     ("Spc", "Mark"),

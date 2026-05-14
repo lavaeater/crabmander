@@ -8,13 +8,11 @@ use tracing::{debug, info};
 use crate::{
     action::{Action, BranchInfo, Side},
     components::{
+        context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
         dialog::{self, DeferredOp, DialogState, MenuAction, MenuItem},
         func_bar,
         git_view::GitView,
-        panel::{
-            Panel, copy_recursive, delete_recursive, extract_archive, file_name_of, is_archive,
-            is_executable,
-        },
+        panel::{Panel, copy_recursive, delete_recursive, extract_archive, file_name_of},
     },
     config::{Config, get_data_dir},
     palette::Palette,
@@ -54,6 +52,7 @@ pub struct App {
     branch_list: Vec<BranchInfo>,
     branch_cursor: usize,
     git_watcher: Option<tokio_util::sync::CancellationToken>,
+    providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
     should_quit: bool,
     should_suspend: bool,
@@ -97,6 +96,7 @@ impl App {
             branch_list: Vec::new(),
             branch_cursor: 0,
             git_watcher: None,
+            providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
             should_quit: false,
             should_suspend: false,
@@ -259,6 +259,7 @@ impl App {
                 KeyCode::F(4) | KeyCode::Char('p') => tx.send(Action::GitPush)?,
                 KeyCode::F(5) | KeyCode::Char('P') => tx.send(Action::GitPull)?,
                 KeyCode::F(6) | KeyCode::Char('b') => tx.send(Action::GitListBranches)?,
+                KeyCode::F(7) | KeyCode::Char('A') => tx.send(Action::GitAddAllAndCommit)?,
                 KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
                 KeyCode::Char('r') => tx.send(Action::GitReload)?,
                 _ => {}
@@ -512,6 +513,8 @@ impl App {
                 Action::GitToggleMark => {
                     if let Some(gv) = &mut self.git_view { gv.toggle_mark(); }
                 }
+                Action::GitAddAllAndCommit => self.do_git_add_all_and_commit(),
+                Action::GitAddAllDone => self.open_commit_textarea(),
                 Action::GitStage => self.do_git_stage(),
                 Action::GitUnstage => self.do_git_unstage(),
                 Action::GitCommit => self.do_git_commit(),
@@ -779,102 +782,25 @@ impl App {
     }
 
     fn open_context_menu(&mut self) {
-        let Some(entry) = self.active_panel().current_entry() else {
-            return;
+        let Some(entry) = self.active_panel().current_entry() else { return };
+        if entry.name == ".." { return; }
+
+        let ctx = MenuCtx {
+            entry_path: self.active_panel().path.join(&entry.name),
+            panel_dir: self.active_panel().path.clone(),
+            other_dir: self.get_panel(self.active.other()).path.clone(),
+            effective_targets: self.active_panel().effective_targets(),
+            active_side: self.active,
+            entry: entry.clone(),
         };
-        if entry.name == ".." {
-            return;
-        }
+        let title = format!("Actions: {}", ctx.entry.name);
 
-        let path = self.active_panel().path.join(&entry.name);
-        let panel_dir = self.active_panel().path.clone();
-        let other_dir = self.get_panel(self.active.other()).path.clone();
-        let is_dir = entry.is_dir;
-        let name = entry.name.clone();
+        let items: Vec<MenuItem> = self.providers
+            .iter()
+            .flat_map(|p| p.items(&ctx))
+            .collect();
 
-        let mut items: Vec<MenuItem> = Vec::new();
-
-        // Always available
-        items.push(MenuItem::new(
-            "Open with OS (xdg-open)",
-            MenuAction::OpenWithOs(path.clone()),
-        ));
-        let code_dir = if is_dir {
-            path.clone()
-        } else {
-            panel_dir.clone()
-        };
-        items.push(MenuItem::new(
-            "Run VS Code here",
-            MenuAction::RunCodeHere(code_dir),
-        ));
-
-        // Archive extraction
-        if !is_dir && is_archive(&name) {
-            items.push(MenuItem::new(
-                "Extract here",
-                MenuAction::ExtractHere {
-                    archive: path.clone(),
-                    dest: panel_dir,
-                },
-            ));
-            items.push(MenuItem::new(
-                format!("Extract to → {}", other_dir.display()),
-                MenuAction::ExtractHere {
-                    archive: path.clone(),
-                    dest: other_dir,
-                },
-            ));
-        }
-
-        // Executable
-        if !is_dir && is_executable(&path) {
-            items.push(MenuItem::new("Execute…", MenuAction::RequestExecute(path.clone())));
-        }
-
-        // Chown — always available; operates on marked files or cursor file.
-        {
-            let targets = self.active_panel().effective_targets();
-            let current_owner = self
-                .active_panel()
-                .current_entry()
-                .map(|e| e.owner.clone())
-                .unwrap_or_default();
-            let reload_sides = vec![self.active];
-            items.push(MenuItem::new(
-                format!("Change owner… (now: {})", current_owner),
-                MenuAction::Chown { paths: targets, current_owner, reload_sides },
-            ));
-        }
-
-        // Removable storage mount/unmount
-        for dev in enumerate_removable_devices() {
-            if let Some(mp) = &dev.mountpoint {
-                items.push(MenuItem::new(
-                    format!(
-                        "Unmount {} — {} at {}",
-                        dev.name,
-                        dev.human_label(),
-                        mp
-                    ),
-                    MenuAction::UnmountDevice {
-                        device: dev.name.clone(),
-                    },
-                ));
-            } else if dev.fstype.is_some() {
-                items.push(MenuItem::new(
-                    format!("Mount {} — {}", dev.name, dev.human_label()),
-                    MenuAction::MountDevice {
-                        device: dev.name.clone(),
-                    },
-                ));
-            }
-        }
-
-        self.open_dialog(DialogState::context_menu(
-            format!("Actions: {}", name),
-            items,
-        ));
+        self.open_dialog(DialogState::context_menu(title, items));
     }
 
     fn open_dialog(&mut self, state: DialogState) {
@@ -1272,6 +1198,10 @@ impl App {
             self.last_error = Some("Nothing staged to commit".into());
             return;
         }
+        self.open_commit_textarea();
+    }
+
+    fn open_commit_textarea(&mut self) {
         let mut ta = TextArea::default();
         ta.set_block(
             ratatui::widgets::Block::default()
@@ -1282,6 +1212,30 @@ impl App {
         ta.set_placeholder_text("Summary line\n\nOptional body…");
         self.commit_textarea = Some(ta);
         self.mode = Mode::GitCommit;
+    }
+
+    fn do_git_add_all_and_commit(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let mut index = repo.index()?;
+                // Equivalent to `git add -A`: stage new/modified files and
+                // remove index entries for files deleted from the working tree.
+                index.add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)?;
+                index.update_all(["."].iter(), None)?;
+                index.write()?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => { let _ = tx.send(Action::GitAddAllDone); }
+                Ok(Err(e)) => { let _ = tx.send(Action::OpError(e.to_string())); }
+                Err(e)     => { let _ = tx.send(Action::OpError(e.to_string())); }
+            }
+        });
     }
 
     fn submit_git_commit(&mut self) {
@@ -1839,104 +1793,6 @@ fn format_status_size(bytes: u64) -> String {
         format!("{} B", bytes)
     } else {
         format!("{:.1} {}", val, UNITS[unit])
-    }
-}
-
-// --- Removable device enumeration via lsblk ---
-
-struct RemovableDev {
-    name: String,
-    size: Option<String>,
-    fstype: Option<String>,
-    label: Option<String>,
-    model: Option<String>,
-    mountpoint: Option<String>,
-}
-
-impl RemovableDev {
-    fn human_label(&self) -> String {
-        let mut parts: Vec<&str> = Vec::new();
-        if let Some(s) = &self.size {
-            parts.push(s.as_str());
-        }
-        if let Some(fs) = &self.fstype {
-            parts.push(fs.as_str());
-        }
-        if let Some(lbl) = &self.label {
-            parts.push(lbl.as_str());
-        }
-        if let Some(model) = &self.model {
-            parts.push(model.as_str());
-        }
-        if parts.is_empty() {
-            self.name.clone()
-        } else {
-            parts.join(", ")
-        }
-    }
-}
-
-fn enumerate_removable_devices() -> Vec<RemovableDev> {
-    let Ok(out) = std::process::Command::new("lsblk")
-        .args([
-            "-J",
-            "-o",
-            "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,HOTPLUG,TYPE",
-        ])
-        .output()
-    else {
-        return Vec::new();
-    };
-    let Ok(json) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-        return Vec::new();
-    };
-    let mut result = Vec::new();
-    if let Some(devs) = json["blockdevices"].as_array() {
-        for dev in devs {
-            collect_removable(dev, &mut result, dev["model"].as_str().map(str::trim));
-        }
-    }
-    result
-}
-
-fn collect_removable<'a>(
-    node: &'a serde_json::Value,
-    out: &mut Vec<RemovableDev>,
-    parent_model: Option<&'a str>,
-) {
-    let hotplug = node["hotplug"].as_bool().unwrap_or(false)
-        || node["hotplug"].as_str().map(|s| s == "1").unwrap_or(false);
-    let kind = node["type"].as_str().unwrap_or("");
-    let model = node["model"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or(parent_model)
-        .map(str::to_owned);
-
-    if hotplug && (kind == "part" || kind == "disk") {
-        let fstype = node["fstype"].as_str().filter(|s| !s.is_empty()).map(String::from);
-        // Only include partitions (or bare disks) that have a filesystem
-        if fstype.is_some() || kind == "part" {
-            out.push(RemovableDev {
-                name: node["name"].as_str().unwrap_or("").to_owned(),
-                size: node["size"].as_str().filter(|s| !s.is_empty()).map(String::from),
-                fstype,
-                label: node["label"].as_str().filter(|s| !s.is_empty()).map(String::from),
-                model,
-                mountpoint: node["mountpoint"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .map(String::from),
-            });
-            return; // don't recurse into children of a partition
-        }
-    }
-
-    if let Some(children) = node["children"].as_array() {
-        for child in children {
-            collect_removable(child, out, model.as_deref().or(parent_model));
-        }
     }
 }
 

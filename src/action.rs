@@ -185,6 +185,8 @@ pub enum Action {
     GitPush,
     GitPull,
     GitReload,
+    GitAddAllAndCommit,
+    GitAddAllDone,
     GitListBranches,
     GitNewBranch,
     GitBranchNavUp,
