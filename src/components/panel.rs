@@ -863,7 +863,7 @@ async fn recursive_size(path: &Path) -> u64 {
 
 // --- Formatting helpers ---
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "K", "M", "G", "T"];
     let mut val = bytes as f64;
     let mut unit = 0;
@@ -878,7 +878,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-fn format_age(unix_secs: u64) -> String {
+pub(crate) fn format_age(unix_secs: u64) -> String {
     if unix_secs == 0 {
         return "         ".into();
     }
@@ -903,7 +903,7 @@ fn format_age(unix_secs: u64) -> String {
 
 /// Shorten leftmost path components to their first character until the string
 /// fits within `max_chars`.  `/home/tommie/projects` → `/h/t/projects` etc.
-fn condense_path(path: &str, max_chars: usize) -> String {
+pub(crate) fn condense_path(path: &str, max_chars: usize) -> String {
     if path.len() <= max_chars {
         return path.to_string();
     }
@@ -950,4 +950,453 @@ async fn detect_git_info(start: &Path) -> (Option<String>, bool) {
     })
     .await
     .unwrap_or((None, false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::Side;
+
+    // --- Helpers ---
+
+    fn entry(name: &str, is_dir: bool, size: u64, modified: u64) -> EntryInfo {
+        EntryInfo {
+            name: name.to_string(),
+            is_dir,
+            is_symlink: false,
+            size,
+            modified,
+            nlink: 1,
+            owner: "user".to_string(),
+        }
+    }
+
+    fn file(name: &str) -> EntryInfo {
+        entry(name, false, 100, 1_000_000)
+    }
+
+    fn dir(name: &str) -> EntryInfo {
+        entry(name, true, 0, 1_000_000)
+    }
+
+    /// Build a Panel with `entries` already loaded (no async, no tokio runtime needed).
+    fn panel_with(entries: Vec<EntryInfo>) -> Panel {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut p = Panel::new(Side::Left, "/tmp/test".into(), tx);
+        p.entries = entries;
+        p.rebuild_view();
+        p
+    }
+
+    // --- condense_path ---
+
+    #[test]
+    fn condense_path_fits_unchanged() {
+        assert_eq!(condense_path("/home/user", 20), "/home/user");
+    }
+
+    #[test]
+    fn condense_path_shortens_prefix_components() {
+        let long = "/home/tommie/projects/my-project";
+        let result = condense_path(long, 20);
+        assert!(result.len() <= 20, "path should be condensed; got {result:?}");
+        assert!(result.ends_with("my-project"), "last component must be intact");
+    }
+
+    #[test]
+    fn condense_path_never_shortens_last_component() {
+        let result = condense_path("/home/user/very-long-final-name", 5);
+        assert!(result.ends_with("very-long-final-name"));
+    }
+
+    #[test]
+    fn condense_path_relative_no_leading_slash() {
+        let result = condense_path("projects/src/main", 10);
+        assert!(result.ends_with("main"));
+    }
+
+    // --- format_size ---
+
+    #[test]
+    fn format_size_zero_bytes() {
+        let s = format_size(0);
+        assert!(s.contains('B') && !s.contains('K'), "got {s:?}");
+    }
+
+    #[test]
+    fn format_size_kilobytes() {
+        let s = format_size(2048);
+        assert!(s.contains('K'), "expected K unit; got {s:?}");
+    }
+
+    #[test]
+    fn format_size_megabytes() {
+        let s = format_size(2 * 1024 * 1024);
+        assert!(s.contains('M'), "expected M unit; got {s:?}");
+    }
+
+    #[test]
+    fn format_size_gigabytes() {
+        let s = format_size(2 * 1024 * 1024 * 1024);
+        assert!(s.contains('G'), "expected G unit; got {s:?}");
+    }
+
+    // --- format_age ---
+
+    #[test]
+    fn format_age_zero_returns_spaces() {
+        let s = format_age(0);
+        assert!(s.chars().all(|c| c == ' '), "expected all spaces; got {s:?}");
+    }
+
+    #[test]
+    fn format_age_very_old_timestamp_shows_years() {
+        // unix timestamp 1000 is 1970-01-01T00:16:40 — always many years ago
+        let s = format_age(1000);
+        assert!(s.contains('y'), "expected 'y' for years; got {s:?}");
+    }
+
+    #[test]
+    fn format_age_recent_shows_minutes() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let s = format_age(now - 120); // 2 minutes ago
+        assert!(s.contains('m'), "expected 'm' for minutes; got {s:?}");
+    }
+
+    // --- is_archive ---
+
+    #[test]
+    fn is_archive_recognises_common_extensions() {
+        for name in &["a.zip", "a.tar.gz", "a.tgz", "a.tar.bz2", "a.tbz2",
+                       "a.tar.xz", "a.txz", "a.7z", "a.rar", "a.tar", "a.gz"] {
+            assert!(is_archive(name), "{name} should be recognised as archive");
+        }
+    }
+
+    #[test]
+    fn is_archive_rejects_non_archives() {
+        for name in &["file.txt", "image.png", "video.mp4", "Makefile", "archive"] {
+            assert!(!is_archive(name), "{name} should not be an archive");
+        }
+    }
+
+    #[test]
+    fn is_archive_case_insensitive() {
+        assert!(is_archive("BACKUP.ZIP"));
+        assert!(is_archive("Data.TAR.GZ"));
+    }
+
+    // --- Panel navigation ---
+
+    #[test]
+    fn nav_up_at_top_stays_at_zero() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt")]);
+        p.cursor = 0;
+        p.nav_up();
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn nav_up_from_middle_decrements() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.cursor = 2;
+        p.nav_up();
+        assert_eq!(p.cursor, 1);
+    }
+
+    #[test]
+    fn nav_down_at_last_stays() {
+        let mut p = panel_with(vec![file("a.txt")]);
+        p.cursor = 0;
+        p.nav_down();
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn nav_down_from_middle_increments() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.cursor = 1;
+        p.nav_down();
+        assert_eq!(p.cursor, 2);
+    }
+
+    #[test]
+    fn nav_top_jumps_to_first() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.cursor = 2;
+        p.nav_top();
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn nav_bottom_jumps_to_last() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.nav_bottom();
+        assert_eq!(p.cursor, 2);
+    }
+
+    #[test]
+    fn nav_page_up_clamps_to_zero() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.cursor = 2;
+        p.nav_page_up(100);
+        assert_eq!(p.cursor, 0);
+    }
+
+    #[test]
+    fn nav_page_down_clamps_to_last() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.nav_page_down(100);
+        assert_eq!(p.cursor, 2);
+    }
+
+    // --- Marking ---
+
+    #[test]
+    fn toggle_mark_on_dotdot_skips_mark_and_advances() {
+        let mut p = panel_with(vec![dir(".."), file("a.txt")]);
+        p.cursor = 0;
+        p.toggle_mark();
+        assert!(!p.marked.contains(".."), "'..' must never be markable");
+        assert_eq!(p.cursor, 1, "cursor should advance past '..'");
+    }
+
+    #[test]
+    fn toggle_mark_marks_file_and_advances_cursor() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt")]);
+        p.cursor = 0;
+        p.toggle_mark();
+        assert!(p.marked.contains("a.txt"));
+        assert_eq!(p.cursor, 1);
+    }
+
+    #[test]
+    fn toggle_mark_unmarks_already_marked_file() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt")]);
+        p.marked.insert("a.txt".into());
+        p.cursor = 0;
+        p.toggle_mark();
+        assert!(!p.marked.contains("a.txt"), "second toggle should unmark");
+    }
+
+    #[test]
+    fn toggle_mark_all_marks_everything_except_dotdot() {
+        let mut p = panel_with(vec![dir(".."), dir("subdir"), file("a.txt"), file("b.txt")]);
+        p.toggle_mark_all();
+        assert!(!p.marked.contains(".."));
+        assert!(p.marked.contains("subdir"));
+        assert!(p.marked.contains("a.txt"));
+        assert!(p.marked.contains("b.txt"));
+    }
+
+    #[test]
+    fn toggle_mark_all_when_all_marked_clears_all() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt")]);
+        p.toggle_mark_all(); // mark all
+        assert_eq!(p.marked.len(), 2);
+        p.toggle_mark_all(); // clear all
+        assert!(p.marked.is_empty());
+    }
+
+    // --- effective_targets ---
+
+    #[test]
+    fn effective_targets_returns_cursor_entry_when_no_marks() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt")]);
+        p.cursor = 1;
+        let targets = p.effective_targets();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].file_name().unwrap(), "b.txt");
+    }
+
+    #[test]
+    fn effective_targets_empty_when_cursor_on_dotdot() {
+        let mut p = panel_with(vec![dir(".."), file("a.txt")]);
+        p.cursor = 0; // cursor on ".."
+        assert!(p.effective_targets().is_empty());
+    }
+
+    #[test]
+    fn effective_targets_returns_all_marked_ignoring_cursor() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.marked.insert("a.txt".into());
+        p.marked.insert("c.txt".into());
+        p.cursor = 1; // cursor on b.txt — should be ignored
+        let targets = p.effective_targets();
+        assert_eq!(targets.len(), 2);
+        let names: Vec<&str> = targets.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        assert!(names.contains(&"a.txt"));
+        assert!(names.contains(&"c.txt"));
+    }
+
+    // --- marked_summary ---
+
+    #[test]
+    fn marked_summary_none_when_no_marks() {
+        let p = panel_with(vec![file("a.txt")]);
+        assert!(p.marked_summary().is_none());
+    }
+
+    #[test]
+    fn marked_summary_counts_and_sums_marked_sizes() {
+        let mut p = panel_with(vec![
+            entry("a.txt", false, 100, 0),
+            entry("b.txt", false, 200, 0),
+            entry("c.txt", false, 400, 0),
+        ]);
+        p.marked.insert("a.txt".into());
+        p.marked.insert("c.txt".into());
+        let (count, size) = p.marked_summary().unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(size, 500);
+    }
+
+    // --- Sort ---
+
+    #[test]
+    fn cycle_sort_mode_cycles_name_size_modified() {
+        let mut p = panel_with(vec![file("a.txt")]);
+        assert_eq!(p.sort_mode, SortMode::Name);
+        p.cycle_sort_mode();
+        assert_eq!(p.sort_mode, SortMode::Size);
+        p.cycle_sort_mode();
+        assert_eq!(p.sort_mode, SortMode::Modified);
+        p.cycle_sort_mode();
+        assert_eq!(p.sort_mode, SortMode::Name);
+    }
+
+    #[test]
+    fn invert_sort_toggles_asc_desc() {
+        let mut p = panel_with(vec![file("a.txt")]);
+        assert_eq!(p.sort_order, SortOrder::Asc);
+        p.invert_sort();
+        assert_eq!(p.sort_order, SortOrder::Desc);
+        p.invert_sort();
+        assert_eq!(p.sort_order, SortOrder::Asc);
+    }
+
+    #[test]
+    fn rebuild_view_sorts_dirs_before_files() {
+        let p = panel_with(vec![file("z_file.txt"), dir("a_dir")]);
+        let first = &p.entries[p.view_indices[0]];
+        assert!(first.is_dir, "directories must appear before files");
+    }
+
+    #[test]
+    fn rebuild_view_sorts_alphabetically_by_default() {
+        let p = panel_with(vec![file("c.txt"), file("a.txt"), file("b.txt")]);
+        let names: Vec<&str> = p
+            .view_indices
+            .iter()
+            .map(|&i| p.entries[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn rebuild_view_sort_desc_reverses_order() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.invert_sort();
+        let names: Vec<&str> = p
+            .view_indices
+            .iter()
+            .map(|&i| p.entries[i].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["c.txt", "b.txt", "a.txt"]);
+    }
+
+    #[test]
+    fn rebuild_view_sort_by_size_desc() {
+        let mut p = panel_with(vec![
+            entry("small.txt", false, 10, 0),
+            entry("big.txt",   false, 999, 0),
+            entry("mid.txt",   false, 500, 0),
+        ]);
+        p.cycle_sort_mode(); // Size
+        p.invert_sort();     // Desc
+        let first = &p.entries[p.view_indices[0]];
+        assert_eq!(first.name, "big.txt");
+    }
+
+    // --- Filter ---
+
+    #[test]
+    fn push_filter_char_narrows_view() {
+        let mut p = panel_with(vec![file("alpha.txt"), file("beta.txt"), file("gamma.txt")]);
+        p.push_filter_char('b');
+        p.push_filter_char('e');
+        assert_eq!(p.view_indices.len(), 1);
+        assert_eq!(p.entries[p.view_indices[0]].name, "beta.txt");
+    }
+
+    #[test]
+    fn push_filter_char_is_case_insensitive() {
+        let mut p = panel_with(vec![file("Upper.txt"), file("lower.txt")]);
+        p.push_filter_char('u');
+        p.push_filter_char('p');
+        assert_eq!(p.view_indices.len(), 1);
+        assert_eq!(p.entries[p.view_indices[0]].name, "Upper.txt");
+    }
+
+    #[test]
+    fn pop_filter_char_widens_view() {
+        let mut p = panel_with(vec![file("alpha.txt"), file("zeta.txt")]);
+        // "alph" matches only alpha.txt; "zeta.txt" does not contain "alph"
+        for c in "alph".chars() {
+            p.push_filter_char(c);
+        }
+        assert_eq!(p.view_indices.len(), 1, "filter 'alph' should match only alpha.txt");
+        p.pop_filter_char(); // filter back to "alp"
+        assert_eq!(p.view_indices.len(), 1, "filter 'alp' still matches only alpha.txt");
+        p.pop_filter_char();
+        p.pop_filter_char();
+        p.pop_filter_char(); // filter cleared
+        assert_eq!(p.view_indices.len(), 2, "cleared filter should show all entries");
+    }
+
+    #[test]
+    fn clear_filter_restores_full_view() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.push_filter_char('z'); // matches nothing
+        assert_eq!(p.view_indices.len(), 0);
+        p.clear_filter();
+        assert_eq!(p.view_indices.len(), 3);
+    }
+
+    #[test]
+    fn filter_never_hides_dotdot() {
+        let mut p = panel_with(vec![dir(".."), file("a.txt")]);
+        p.push_filter_char('z'); // matches nothing except ".."
+        let visible_names: Vec<&str> = p
+            .view_indices
+            .iter()
+            .map(|&i| p.entries[i].name.as_str())
+            .collect();
+        assert!(visible_names.contains(&".."), "'..' must always remain visible");
+    }
+
+    // --- current_entry / cursor_entry ---
+
+    #[test]
+    fn current_entry_none_on_empty_panel() {
+        let p = panel_with(vec![]);
+        assert!(p.current_entry().is_none());
+    }
+
+    #[test]
+    fn current_entry_returns_entry_at_cursor() {
+        let mut p = panel_with(vec![file("a.txt"), file("b.txt"), file("c.txt")]);
+        p.cursor = 1;
+        assert_eq!(p.current_entry().unwrap().name, "b.txt");
+    }
+
+    #[test]
+    fn cursor_entry_is_alias_for_current_entry() {
+        let mut p = panel_with(vec![file("x.txt")]);
+        p.cursor = 0;
+        assert_eq!(p.cursor_entry().unwrap().name, p.current_entry().unwrap().name);
+    }
 }

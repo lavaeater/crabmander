@@ -214,3 +214,24 @@ pub struct BranchInfo {
     /// For remote-only branches: the canonical remote ref (e.g. "origin/foo").
     pub remote_ref: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_other_left_gives_right() {
+        assert_eq!(Side::Left.other(), Side::Right);
+    }
+
+    #[test]
+    fn side_other_right_gives_left() {
+        assert_eq!(Side::Right.other(), Side::Left);
+    }
+
+    #[test]
+    fn side_other_is_involution() {
+        assert_eq!(Side::Left.other().other(), Side::Left);
+        assert_eq!(Side::Right.other().other(), Side::Right);
+    }
+}

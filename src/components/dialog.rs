@@ -366,3 +366,238 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
         height: height.min(area.height),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_op() -> DeferredOp {
+        DeferredOp::Mkdir { base: std::path::PathBuf::from("/tmp") }
+    }
+
+    fn menu_items(n: usize) -> Vec<MenuItem> {
+        (0..n)
+            .map(|i| MenuItem::new(format!("item {i}"), MenuAction::CdTo("/".into())))
+            .collect()
+    }
+
+    // --- constructors ---
+
+    #[test]
+    fn confirm_constructor_stores_fields() {
+        let d = DialogState::confirm("Delete", "Are you sure?", dummy_op());
+        if let DialogState::Confirm { title, message, .. } = d {
+            assert_eq!(title, "Delete");
+            assert_eq!(message, "Are you sure?");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn input_constructor_stores_fields() {
+        let d = DialogState::input("Copy", "Copy to:", "/dest", dummy_op());
+        if let DialogState::Input { title, prompt, value, .. } = d {
+            assert_eq!(title, "Copy");
+            assert_eq!(prompt, "Copy to:");
+            assert_eq!(value, "/dest");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn context_menu_constructor_starts_at_zero() {
+        let d = DialogState::context_menu("Menu", menu_items(5));
+        if let DialogState::ContextMenu { selected, items, .. } = &d {
+            assert_eq!(*selected, 0);
+            assert_eq!(items.len(), 5);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn error_list_constructor_scroll_starts_at_zero() {
+        let d = DialogState::error_list("Errors", vec!["e1".into(), "e2".into()]);
+        if let DialogState::ErrorList { scroll, errors, .. } = &d {
+            assert_eq!(*scroll, 0);
+            assert_eq!(errors.len(), 2);
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    // --- push_char / pop_char ---
+
+    #[test]
+    fn push_char_appends_to_input_value() {
+        let mut d = DialogState::input("T", "P", "he", dummy_op());
+        d.push_char('y');
+        if let DialogState::Input { value, .. } = &d {
+            assert_eq!(value, "hey");
+        }
+    }
+
+    #[test]
+    fn push_char_is_noop_on_confirm() {
+        let mut d = DialogState::confirm("T", "m", dummy_op());
+        d.push_char('x'); // must not panic
+        matches!(d, DialogState::Confirm { .. });
+    }
+
+    #[test]
+    fn pop_char_removes_last_character() {
+        let mut d = DialogState::input("T", "P", "hello", dummy_op());
+        d.pop_char();
+        if let DialogState::Input { value, .. } = &d {
+            assert_eq!(value, "hell");
+        }
+    }
+
+    #[test]
+    fn pop_char_on_empty_input_is_noop() {
+        let mut d = DialogState::input("T", "P", "", dummy_op());
+        d.pop_char(); // must not panic
+        if let DialogState::Input { value, .. } = &d {
+            assert_eq!(value, "");
+        }
+    }
+
+    // --- ContextMenu nav ---
+
+    #[test]
+    fn context_menu_nav_down_increments_selected() {
+        let mut d = DialogState::context_menu("M", menu_items(3));
+        d.nav_down();
+        if let DialogState::ContextMenu { selected, .. } = &d {
+            assert_eq!(*selected, 1);
+        }
+    }
+
+    #[test]
+    fn context_menu_nav_down_at_last_item_stays() {
+        let mut d = DialogState::context_menu("M", menu_items(2));
+        d.nav_down();
+        d.nav_down(); // now at last (index 1)
+        d.nav_down(); // must not go past last
+        if let DialogState::ContextMenu { selected, .. } = &d {
+            assert_eq!(*selected, 1);
+        }
+    }
+
+    #[test]
+    fn context_menu_nav_up_at_zero_stays() {
+        let mut d = DialogState::context_menu("M", menu_items(3));
+        d.nav_up();
+        if let DialogState::ContextMenu { selected, .. } = &d {
+            assert_eq!(*selected, 0);
+        }
+    }
+
+    #[test]
+    fn context_menu_nav_up_decrements_selected() {
+        let mut d = DialogState::context_menu("M", menu_items(3));
+        d.nav_down();
+        d.nav_down(); // selected = 2
+        d.nav_up();   // selected = 1
+        if let DialogState::ContextMenu { selected, .. } = &d {
+            assert_eq!(*selected, 1);
+        }
+    }
+
+    // --- QuickCd nav ---
+
+    #[test]
+    fn quick_cd_nav_down_increments_selected() {
+        let mut d = DialogState::QuickCd {
+            input: String::new(),
+            matches: vec!["a".into(), "b".into(), "c".into()],
+            selected: 0,
+            base_path: "/tmp".into(),
+        };
+        d.nav_down();
+        if let DialogState::QuickCd { selected, .. } = &d {
+            assert_eq!(*selected, 1);
+        }
+    }
+
+    #[test]
+    fn quick_cd_nav_down_at_last_stays() {
+        let mut d = DialogState::QuickCd {
+            input: String::new(),
+            matches: vec!["a".into(), "b".into()],
+            selected: 1,
+            base_path: "/tmp".into(),
+        };
+        d.nav_down();
+        if let DialogState::QuickCd { selected, .. } = &d {
+            assert_eq!(*selected, 1);
+        }
+    }
+
+    #[test]
+    fn quick_cd_nav_up_at_zero_stays() {
+        let mut d = DialogState::QuickCd {
+            input: String::new(),
+            matches: vec!["a".into()],
+            selected: 0,
+            base_path: "/tmp".into(),
+        };
+        d.nav_up();
+        if let DialogState::QuickCd { selected, .. } = &d {
+            assert_eq!(*selected, 0);
+        }
+    }
+
+    // --- ErrorList nav ---
+
+    #[test]
+    fn error_list_nav_down_increments_scroll() {
+        let mut d = DialogState::error_list("E", vec!["e1".into(), "e2".into(), "e3".into()]);
+        d.nav_down();
+        if let DialogState::ErrorList { scroll, .. } = &d {
+            assert_eq!(*scroll, 1);
+        }
+    }
+
+    #[test]
+    fn error_list_nav_up_decrements_scroll() {
+        let mut d = DialogState::error_list("E", vec!["e1".into(), "e2".into()]);
+        d.nav_down();
+        d.nav_up();
+        if let DialogState::ErrorList { scroll, .. } = &d {
+            assert_eq!(*scroll, 0);
+        }
+    }
+
+    #[test]
+    fn error_list_nav_down_at_last_stays() {
+        let mut d = DialogState::error_list("E", vec!["only".into()]);
+        d.nav_down();
+        if let DialogState::ErrorList { scroll, .. } = &d {
+            assert_eq!(*scroll, 0);
+        }
+    }
+
+    // --- is_quick_cd ---
+
+    #[test]
+    fn is_quick_cd_true_for_quick_cd_variant() {
+        let d = DialogState::QuickCd {
+            input: String::new(),
+            matches: vec![],
+            selected: 0,
+            base_path: "/tmp".into(),
+        };
+        assert!(d.is_quick_cd());
+    }
+
+    #[test]
+    fn is_quick_cd_false_for_other_variants() {
+        assert!(!DialogState::confirm("T", "m", dummy_op()).is_quick_cd());
+        assert!(!DialogState::input("T", "p", "v", dummy_op()).is_quick_cd());
+        assert!(!DialogState::context_menu("M", vec![]).is_quick_cd());
+        assert!(!DialogState::error_list("E", vec![]).is_quick_cd());
+    }
+}
