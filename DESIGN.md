@@ -1,109 +1,127 @@
 # Crabmander — Design Document
 
-Crabmander is a dual-pane TUI file manager inspired by Norton Commander and Midnight Commander. This document describes the target UI, keyboard model, component architecture, and implementation plan.
+Crabmander is a dual-pane TUI file manager inspired by Norton Commander and Midnight Commander. This document describes the current UI, keyboard model, component architecture, and plans for future work.
 
 ---
 
 ## Layout
 
 ```
-┌─ /home/user/documents ───────────────┬─ /home/user/downloads ───────────────┐
-│ Name               Size   Date       │ Name               Size   Date        │
+┌─ /home/user/documents [main*] ───────┬─ /home/user/downloads ───────────────┐
+│ Name↑              Size   Date  Owner│ Name↑              Size   Date  Owner │
 │ ..                 <DIR>             │ ..                 <DIR>              │
 │ projects/          <DIR>  Jan 15     │*archive.tar.gz    45.3M  Jan 16      │
-│▶README.md          4.5K   Jan 14     │ image.png          2.1M  Jan 14      │
+│▶README.md          4.5K   Jan 14  me │ image.png          2.1M  Jan 14      │
 │*notes.txt           892B  Jan 13     │ video.mp4          1.2G  Jan 12      │
-│ todo.md            1.1K   Jan 12     │                                       │
-│                                      │                                       │
+│ Filter: notes_                       │                                       │
 ├──────────────────────────────────────┴───────────────────────────────────────┤
 │ README.md  4,608 bytes                           2 marked (5,500 bytes)      │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│ F2 Menu  F3 View  F4 Edit  F5 Copy  F6 Move  F7 MkDir  F8 Delete  F10 Quit  │
+│ F1 QuickCD ⇧F1 Recent F2 Menu F3 Nano F4 Sizes F5 Copy F6 Move F7 MkDir … │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - The two panels split the terminal width 50/50 with a vertical divider.
 - The active panel's border is highlighted; the inactive panel's is dimmed.
-- `▶` marks the cursor row. `*` marks a file selected for bulk operations.
-- The status bar (one row) shows the cursor file's name and size on the left, and the marked-file count and cumulative size on the right. When nothing is marked it shows only cursor info.
-- The function bar (one row) is always visible. Unavailable actions (F2, F3, F4 for now) are rendered dimmed.
+- The panel title shows the (condensed) current path plus `[branch]` or `[branch*]` when inside a git repo.
+- `▶` marks the cursor row (reversed style). `*` marks a file selected for bulk operations.
+- A filter bar appears between the column header and the file list when the user is typing.
+- The status bar shows cursor file name/size on the left, and the active filter + mark count/size on the right.
+- The function bar shows context-sensitive key hints (different set in Git mode).
 
 ---
 
 ## Keyboard Shortcuts
 
-### Navigation
+### Navigation (Normal mode)
 
-| Key                  | Action                          |
-|----------------------|---------------------------------|
-| `↑` / `k`            | Move cursor up                  |
-| `↓` / `j`            | Move cursor down                |
-| `PgUp`               | Page up                         |
-| `PgDn`               | Page down                       |
-| `Home` / `g`         | Jump to first entry             |
-| `End` / `G`          | Jump to last entry              |
-| `Enter` / `→`        | Enter directory / open file     |
-| `Backspace` / `←`    | Go to parent directory          |
-| `Tab`                | Switch active panel             |
+| Key                  | Action                                     |
+|----------------------|--------------------------------------------|
+| `↑` / `k`            | Move cursor up                             |
+| `↓` / `j`            | Move cursor down                           |
+| `PgUp`               | Page up                                    |
+| `PgDn`               | Page down                                  |
+| `Home` / `g`         | Jump to first entry                        |
+| `End` / `G`          | Jump to last entry                         |
+| `Enter` / `→`        | Enter directory / open file (xdg-open)     |
+| `Backspace` / `←`    | Go to parent directory                     |
+| `Tab`                | Switch active panel                        |
+| `Shift+Tab`          | Sync other panel to active panel's dir     |
 
 ### Marking
 
-| Key              | Action                                       |
-|------------------|----------------------------------------------|
-| `Space` / `Ins`  | Toggle mark on cursor entry, cursor moves down |
-| `*`              | Toggle mark on all entries in panel          |
+| Key              | Action                                              |
+|------------------|-----------------------------------------------------|
+| `Space` / `Ins`  | Toggle mark on cursor entry; cursor moves down      |
+| `*`              | Toggle mark on all entries in the panel             |
 
-Marking applies to files only; directories cannot be marked. When an operation is triggered with no marks, it acts on the cursor entry.
+Directories can be marked. When an operation is triggered with no marks, it acts on the cursor entry.
+
+### Filter
+
+Typing any printable character that isn't bound as a keybinding activates the inline filter. The panel list narrows in real time (case-insensitive substring match). `Backspace` removes the last character. `Esc` clears the filter. Navigating into a directory also clears the filter.
 
 ### Operations (function keys)
 
-| Key   | Action  | Scope         | Status      |
-|-------|---------|---------------|-------------|
-| `F2`  | Menu    | —             | Later       |
-| `F3`  | View    | cursor / mark | Later       |
-| `F4`  | Edit    | cursor        | Later       |
-| `F5`  | Copy    | cursor / mark | **Now**     |
-| `F6`  | Move    | cursor / mark | **Now**     |
-| `F7`  | MkDir   | —             | **Now**     |
-| `F8`  | Delete  | cursor / mark | **Now**     |
-| `F10` | Quit    | —             | **Now**     |
+| Key       | Action        | Notes                                                  |
+|-----------|---------------|--------------------------------------------------------|
+| `F1`      | Quick CD      | Typeahead directory navigator with Tab completion      |
+| `Shift+F1`| Recent Dirs   | Menu of last 10 visited directories                    |
+| `F2`      | Context Menu  | File-type–aware action list (see below)                |
+| `F3`      | Open in Nano  | Prompt for filename, suspend TUI, open `nano`          |
+| `F4`      | Calc Sizes    | Recursive dir sizes (async, cached), sort by size      |
+| `F5`      | Copy          | Input dialog → async recursive copy                    |
+| `F6`      | Move          | Input dialog → `rename` (cross-fs error if needed)     |
+| `F7`      | MkDir         | Input dialog → `create_dir`                            |
+| `F8`      | Delete        | Confirm dialog → async recursive delete                |
+| `F9`      | Cycle Sort    | Cycles Name → Size → Modified; column header shows `↑↓`|
+| `Shift+F9`| Invert Sort   | Toggle ascending / descending                          |
+| `F10`     | Quit          | Immediate quit                                         |
+| `F11`     | Theme         | Pick from ~20 opaline builtin themes live              |
+| `Ctrl+G`  | Enter Git mode| Available when active panel is inside a git repo       |
 
-`F5` and `F6` copy/move into the directory shown in the **opposite panel**. The destination path is shown pre-filled in the dialog and can be edited before confirming.
+### F2 Context Menu items (file-type aware)
+
+- **Open with OS** — `xdg-open` the file/directory
+- **Run VS Code here** — `code <dir>` in the background
+- **Extract here** / **Extract to →** — for `.zip`, `.tar.*`, `.7z`, `.rar`
+- **Execute…** — prompt for arguments, then suspend TUI and run
+- **Change owner…** — `sudo chown` with optional `-R` for directories
+- **Mount / Unmount** — removable devices discovered via `lsblk --json`
+
+### Git mode (`Ctrl+G`)
+
+| Key          | Action                     |
+|--------------|----------------------------|
+| `↑` / `k`    | Move cursor up             |
+| `↓` / `j`    | Move cursor down           |
+| `Tab`         | Switch between working tree / staging pane |
+| `Space`/`Ins` | Toggle mark               |
+| `F1` / `a`   | Stage                      |
+| `F2` / `u`   | Unstage                    |
+| `F3` / `c`   | Commit (opens textarea)    |
+| `F4` / `p`   | Push to `origin`           |
+| `F5` / `P`   | Pull from `origin` (fast-forward only) |
+| `F6` / `b`   | List branches / checkout   |
+| `n`           | New branch                 |
+| `r`           | Reload status              |
+| `Esc` / `q`  | Exit git mode              |
+
+Commit message editor: `Ctrl+Enter` or `Alt+Enter` submits; `Esc` cancels.
 
 ---
 
 ## Dialogs
 
-All dialogs are modal overlays centred on screen. Keyboard input is captured by the dialog; panels are greyed out.
+All dialogs are modal overlays centred on screen. Keyboard input is captured by the dialog.
 
-### Confirm dialog (Delete)
-
-```
-┌─────────────── Delete ────────────────┐
-│                                       │
-│  Delete 3 marked files?               │
-│                                       │
-│         [ Yes ]    [ No ]             │
-└───────────────────────────────────────┘
-```
-
-`Enter` / `y` confirms. `Esc` / `n` cancels.
-
-### Input dialog (Copy, Move, MkDir)
-
-```
-┌──────────────── Copy ─────────────────┐
-│                                       │
-│  Copy to:                             │
-│  ┌───────────────────────────────┐    │
-│  │ /home/user/downloads          │    │
-│  └───────────────────────────────┘    │
-│                                       │
-│         [ OK ]    [ Cancel ]          │
-└───────────────────────────────────────┘
-```
-
-Editable text field pre-filled with the destination path. `Enter` confirms, `Esc` cancels.
+| Variant      | Trigger             | Description                                        |
+|--------------|---------------------|----------------------------------------------------|
+| `Confirm`    | F8 Delete           | Yes/No prompt with y/n shortcuts                   |
+| `Input`      | F3/F5/F6/F7/Execute | Editable text field with prompt                    |
+| `ContextMenu`| F2, F11, Shift+F1   | Scrollable list of items; ↑↓ to navigate           |
+| `QuickCd`    | F1                  | Typeahead navigator; Tab completes selected match  |
+| `ErrorList`  | after bulk ops      | Scrollable list of per-file error messages         |
 
 ---
 
@@ -113,133 +131,232 @@ Editable text field pre-filled with the destination path. `Enter` confirms, `Esc
 
 ```rust
 pub enum Mode {
-    Normal,   // navigating panels (replaces Home)
-    Dialog,   // a modal is open; panel keys are suppressed
+    Normal,     // navigating panels
+    Dialog,     // a modal overlay is open
+    Git,        // git status view
+    GitCommit,  // textarea commit message editor
+    GitBranch,  // branch picker popup
 }
 ```
 
 ### Actions (`action::Action`)
 
-New variants to add alongside the existing set:
+The `Action` enum is the single vocabulary that flows through the event loop. Key categories:
 
-```rust
-// Navigation
-NavUp, NavDown, NavPageUp, NavPageDown, NavTop, NavBottom,
-NavEnter,   // Enter / →  — descend into dir
-NavParent,  // Backspace / ← — ascend
-
-// Panel
-SwitchPanel,   // Tab
-
-// Marking
-ToggleMark,    // Space / Ins — toggle + advance cursor
-ToggleMarkAll, // * — toggle all
-
-// Operations
-Copy, Move, Mkdir, Delete,
-
-// Dialog lifecycle
-DialogInputChar(char),
-DialogInputBackspace,
-DialogConfirm,
-DialogCancel,
-```
+| Category       | Variants (examples)                                           |
+|----------------|---------------------------------------------------------------|
+| App lifecycle  | `Quit`, `Suspend`, `Resume`, `ClearScreen`, `Render`, `Tick` |
+| Navigation     | `NavUp/Down/PageUp/PageDown/Top/Bottom/Enter/Parent`          |
+| Panel          | `SwitchPanel`, `SyncPanelDir`                                 |
+| Filter         | `FilterChar(char)`, `FilterBackspace`, `FilterClear`          |
+| Marking        | `ToggleMark`, `ToggleMarkAll`                                 |
+| F-key ops      | `Copy`, `Move`, `Mkdir`, `Delete`, `View`, `CalcSizes`, `ContextMenu`, `CycleSortMode`, `InvertSort`, `SelectTheme`, `RecentDirs`, `QuickCd` |
+| Async results  | `DirLoaded`, `DirSizeResult`, `GitInfoLoaded`, `OpCompleted`, `OpError`, `OpErrors` |
+| Execute        | `ExecuteFile { cmd, args, reload }`, `ExecuteCopy/Move/Delete/Mkdir` |
+| Dialog I/O     | `DialogConfirm`, `DialogCancel`, `DialogNavUp/Down`, `DialogInputChar/Backspace` |
+| QuickCd        | `QuickCdChar`, `QuickCdBackspace`, `QuickCdComplete`          |
+| Git mode       | `EnterGitMode`, `ExitGitMode`, `GitStage`, `GitUnstage`, `GitCommit`, `GitPush`, `GitPull`, `GitListBranches`, `GitNewBranch`, `GitStatusLoaded`, `GitBranchesLoaded`, … |
 
 ### Components
 
-Replace the placeholder `Home` component with:
+| Component     | File                          | Responsibility                                            |
+|---------------|-------------------------------|-----------------------------------------------------------|
+| `Panel`       | `src/components/panel.rs`     | File list, navigation, filter, sort, dir-size calc, git indicator |
+| `FunctionBar` | `src/components/func_bar.rs`  | F-key hint row; mode-sensitive (normal vs. git)           |
+| `dialog`      | `src/components/dialog.rs`    | All modal overlays; `DialogState` enum + `draw()`         |
+| `GitView`     | `src/components/git_view.rs`  | Working tree / staging split view; branch ops             |
 
-| Component     | File                          | Responsibility                                          |
-|---------------|-------------------------------|---------------------------------------------------------|
-| `Panel`       | `src/components/panel.rs`     | Renders one file-browser pane; owns `PanelState`        |
-| `FunctionBar` | `src/components/func_bar.rs`  | Renders the F-key hint row at the bottom                |
-| `Dialog`      | `src/components/dialog.rs`    | Renders modal overlays; owns `Option<DialogState>`      |
+`App` (in `src/app.rs`) owns all components and wires them together. It is not a `Component` implementor itself — it is the event loop.
 
-`App` holds two `Panel` instances (left, right) plus `FunctionBar` and `Dialog`. The active panel side is stored in `App` and broadcast to panels via a new `SetActivePanel(Side)` action.
-
-### State model
+### Panel state model
 
 ```rust
-// In src/components/panel.rs
-pub struct PanelState {
+pub struct Panel {
+    pub side: Side,
     pub path: PathBuf,
-    pub entries: Vec<Entry>,   // sorted: dirs first, then files, both alpha
-    pub cursor: usize,
-    pub scroll_offset: usize,
-    pub marked: HashSet<PathBuf>,
+    pub entries: Vec<EntryInfo>,
+    /// Indices into `entries` after filter + sort.
+    pub view_indices: Vec<usize>,
+    pub cursor: usize,           // position within view_indices
+    pub offset: usize,           // scroll offset within view_indices
+    pub marked: HashSet<String>,
+    pub is_active: bool,
+    pub filter: String,
+    pub dir_sizes: HashMap<String, u64>,  // computed by F4
+    pub sort_mode: SortMode,     // Name | Size | Modified
+    pub sort_order: SortOrder,   // Asc | Desc
+    pub git_branch: Option<String>,
+    pub git_dirty: bool,
+    // …plus private fields
 }
 
-pub struct Entry {
-    pub name: OsString,
+pub struct EntryInfo {
+    pub name: String,
     pub is_dir: bool,
-    pub size: u64,           // 0 for dirs
-    pub modified: SystemTime,
+    pub is_symlink: bool,
+    pub size: u64,
+    pub modified: u64,   // unix seconds
+    pub nlink: u32,      // hard-link count; > 1 → entry_hardlink palette style
+    pub owner: String,   // resolved via getpwuid_r
 }
 ```
+
+The `view_indices` indirection means filtering and sorting only rebuild an index slice; `entries` is the stable backing store.
+
+### Dialog state model
 
 ```rust
-// In src/components/dialog.rs
-pub enum DialogKind {
-    Confirm { message: String, on_confirm: Action },
-    Input   { title: String, prompt: String, value: String, on_confirm: Box<dyn Fn(String) -> Action + Send> },
+pub enum DialogState {
+    Confirm   { title, message, op: DeferredOp },
+    Input     { title, prompt, value, op: DeferredOp },
+    ContextMenu { title, items: Vec<MenuItem>, selected },
+    QuickCd   { input, matches: Vec<String>, selected, base_path },
+    ErrorList { title, errors: Vec<String>, scroll },
 }
 
-pub struct DialogState {
-    pub kind: DialogKind,
+pub enum DeferredOp {
+    Delete(Vec<PathBuf>),
+    Copy   { sources },
+    Move   { sources },
+    Mkdir  { base },
+    Execute { path },
+    OpenInNano { base },
+    ChownFiles { paths, reload_sides },
+    GitCreateBranch { git_root },
 }
 ```
 
-### Operation targeting
+On `DialogConfirm`, `App` calls `execute_op(op, value)` which dispatches the async work.
 
-When an operation is triggered the **effective target set** is resolved once:
+### Async file operations
 
-1. If the active panel has any marked files → operate on all marked files.
-2. Otherwise → operate on the entry under the cursor (unless it is `..`).
+All mutating ops run on Tokio tasks and report back via `Action::OpCompleted(Vec<Side>)` or `Action::OpError(String)`. The main loop reloads affected panels on `OpCompleted` and invalidates the session-wide `dir_size_cache` (a `HashMap<PathBuf, u64>` keyed by absolute path).
 
-`F5 Copy` and `F6 Move` open an Input dialog pre-filled with the **opposite panel's current path**. The user can edit the destination before confirming.
+### Theme system
 
-`F7 Mkdir` opens an Input dialog (empty) for the new directory name; the directory is created inside the active panel's current path.
+Themes come from the `opaline` crate (20+ builtins; default: `catppuccin-mocha`). At startup a `Palette` struct is built from the chosen theme — all styles are pre-computed once and passed `&palette` to every draw call.
 
-`F8 Delete` opens a Confirm dialog. On confirm, marked/cursor files are removed. Directories are deleted recursively.
+### Git integration
 
-After any successful mutating operation the active panel (and for Copy/Move the opposite panel) reloads its directory listing.
+- **Panel title indicator**: after every `DirLoaded` the panel spawns a blocking `git2::Repository::discover` task. Result: `[branch]` or `[branch*]` appended to the title.
+- **Git mode**: entered via `Ctrl+G`. A `GitView` replaces the two file panels. A `notify`-based file watcher (debounced to 200 ms) fires `GitReload` on any filesystem change under `.git/`.
+- **Credential helper**: SSH agent → `~/.ssh/id_ed25519|id_rsa|id_ecdsa` fallback.
 
-### Directory loading
+### Recent directories
 
-Directory I/O is synchronous for now (`std::fs::read_dir`). The panel rebuilds its `entries` list on:
+Stored in `$CRABMANDER_DATA/recent_dirs.json` (up to 10 entries). Updated whenever Quick CD navigates to a new directory.
 
-- Initial `init()` call
-- `NavEnter` / `NavParent`
-- Post-operation reload via a `ReloadPanel(Side)` action
+### Configuration
+
+Config lives in `$CRABMANDER_CONFIG` or the XDG config dir. Falls back to the embedded `.config/config.json5`. Keybindings are per-`Mode` maps of key-sequence strings to `Action`s; key sequences are matched using a multi-key accumulator in `App::handle_key_event`.
 
 ---
 
-## Implementation Order
+## Future Work
 
-1. **`PanelState` + `Panel` component** — render a file list, handle all navigation keys, `SwitchPanel`.
-2. **`FunctionBar` component** — static row of F-key hints, dims unavailable ones.
-3. **File marking** — `ToggleMark`, `ToggleMarkAll`, status bar mark count.
-4. **`Dialog` component + `F10` quit** — modal infrastructure; wire Quit through a Confirm dialog.
-5. **`F7 Mkdir`** — Input dialog → `std::fs::create_dir` → reload.
-6. **`F8 Delete`** — Confirm dialog → `std::fs::remove_file` / `remove_dir_all` → reload.
-7. **`F5 Copy`** — Input dialog (destination) → `std::fs::copy` loop → reload both panels.
-8. **`F6 Move`** — Input dialog (destination) → `std::fs::rename` (fallback copy+delete) → reload both panels.
+### More tests
 
+The codebase currently has no automated tests. Priority areas:
 
-## New features and their order of impl
+- **`Panel` unit tests**: `rebuild_view` filter + sort invariants; `toggle_mark`/`toggle_mark_all` edge cases; `effective_targets` when marks are empty vs. populated.
+- **`dialog` unit tests**: `nav_up`/`nav_down` boundary conditions; `push_char`/`pop_char` on the correct variant.
+- **`recent_dirs` tests**: round-trip `push` → `save` → `load`; truncation at `MAX`; deduplication.
+- **`condense_path` / `format_size` / `format_age`**: pure functions with well-defined input/output; trivial to test and high coverage value.
+- **Integration smoke test**: spin up the app in headless mode (no real terminal) and send a sequence of `Action`s into `action_tx`; assert panel state after each.
 
-### Auto-filtering in a pane
+### Architecture: data-driven context menu (removing hard-coding from F2)
 
-If the user starts typing in a pane, the pane filters automatically. Example: user starts typing "down" which would then filter the current directory to show all folders and files that start OR contain down, case-insensitive. Entering a folder (or, in the future, opening a file) clears the filter, as does ESC.
+Today `App::open_context_menu` is one big function that manually builds a `Vec<MenuItem>` by inspecting the current entry. Adding a new menu item means editing that function.
 
-### Push current pane dir to other pane
+A cleaner model is a **`ContextMenuProvider` registry**:
 
-Perhaps this is good for the key-combination Shift+Tab - it would simply make the other pane cd to the same directory as the currently active pane. Useful when one wants to organize a folder
+```rust
+/// Implemented by anyone who wants to contribute items to the F2 menu.
+pub trait ContextMenuProvider: Send + Sync {
+    /// Return items relevant to this entry, or an empty vec if none apply.
+    fn items(&self, ctx: &MenuCtx) -> Vec<MenuItem>;
+}
 
-### Extract / Context-aware commands
+pub struct MenuCtx<'a> {
+    pub entry: &'a EntryInfo,
+    pub entry_path: &'a Path,
+    pub panel_dir: &'a Path,
+    pub other_dir: &'a Path,
+    pub active_side: Side,
+}
+```
 
-So, lets activate the F2 button and make it show a context-menu. This menu will not contain copy, move, rename or delete, but rather file-type specific actions that we could perform. For archive files, such as .rar, .7z, .zip, etc etc, that would mean Extract To -> the other panes directory. We should also probably have some generic file-system opening thing which would just send it to the operating systems normal opening functions. 
+`App` holds a `Vec<Box<dyn ContextMenuProvider>>`. `open_context_menu` iterates the registry and collects all items. Built-in providers (OS open, VS Code, archive extraction, executable run, chown, device mount) each become a small struct in their own module. New commands need no changes to `App` at all.
 
-Also, one menu item could be "Run Code here" which would simply do a "code . &" so we start a Visual Studio Code instance in the current folder.
+This is also the seam through which plugins would add menu items (see below).
 
-If the current file is an executable / executable script, we could also have an "Execute" option - choosing this would also let us specify parameters to send to the script / command.
+### Architecture: generalizing `DeferredOp` for extensibility
+
+`DeferredOp` is an enum, so adding a new operation requires touching `dialog.rs`, `app.rs`, and `action.rs`. A trait-based alternative:
+
+```rust
+pub trait DeferredOp: Send + Sync + std::fmt::Debug {
+    /// Called by App when the dialog is confirmed.
+    fn execute(self: Box<Self>, ctx: &OpCtx);
+}
+```
+
+Each operation becomes its own struct. The dialog carries a `Box<dyn DeferredOp>` instead of an enum variant. The `execute_op` match arm in `App` shrinks to a single `op.execute(&ctx)` call. This also works cleanly for plugin-supplied operations.
+
+### Plugin system (dynamically loaded `.so` / `.dylib`)
+
+The goal is to let third parties ship Rust crates that extend Crabmander's context menu without forking the project.
+
+**How it would work** (based on the dynamically loaded library pattern):
+
+1. **Shared interface crate** (`crabmander-plugin-api`): defines stable, `#[repr(C)]`-compatible traits and a versioned `PluginManifest` that plugins must export. This crate must never break ABI; semver-major bumps are required for any breaking change.
+
+2. **Plugin crate**: compiled as `crate-type = ["cdylib"]`. Exports one `#[no_mangle]` symbol:
+
+   ```rust
+   // In the plugin crate:
+   #[no_mangle]
+   pub extern "C" fn crabmander_plugin_init() -> *mut dyn ContextMenuProvider {
+       Box::into_raw(Box::new(MyProvider))
+   }
+   ```
+
+3. **Host loading** (using the `libloading` crate):
+
+   ```rust
+   fn load_plugin(path: &Path) -> color_eyre::Result<Box<dyn ContextMenuProvider>> {
+       // Safety: the plugin must be compiled against the same crabmander-plugin-api version.
+       let lib = unsafe { libloading::Library::new(path)? };
+       let init: libloading::Symbol<unsafe extern "C" fn() -> *mut dyn ContextMenuProvider>
+           = unsafe { lib.get(b"crabmander_plugin_init")? };
+       let provider = unsafe { Box::from_raw(init()) };
+       // Keep `lib` alive as long as `provider` is live — store them together.
+       Ok(provider)
+   }
+   ```
+
+4. **Discovery**: Crabmander scans `$CRABMANDER_CONFIG/plugins/` (and optionally `$XDG_DATA_HOME/crabmander/plugins/`) for `*.so` / `*.dylib` files at startup and loads each one.
+
+5. **Safety constraints**:
+   - Plugins **must** be compiled with the same Rust toolchain and the same version of `crabmander-plugin-api`. ABI stability is not guaranteed across nightly toolchains; document this clearly.
+   - Because `dylib` plugins share the same process, a crash in a plugin crashes the whole app. Sandboxing (e.g. running plugins in a subprocess over a Unix socket) is a future option but adds significant complexity.
+   - Consider keeping a `plugin_api_version: u32` constant in `PluginManifest` and refusing to load plugins that declare a different version.
+
+6. **What a plugin can do**:
+   - Add items to the F2 context menu (via `ContextMenuProvider`).
+   - In a future extension: add new `DeferredOp` implementations.
+   - In a further extension: register new keybindings by returning `(KeyEvent, Action)` pairs.
+
+This is the minimum viable plugin architecture. It intentionally does not expose internal `App` state to plugins; plugins only see the `MenuCtx` snapshot.
+
+### Other future ideas
+
+- **Rename (F2 submenu or dedicated key)**: an Input dialog pre-filled with the current filename, writes via `fs::rename`.
+- **Symlink creation**: create a relative or absolute symlink to the cursor entry in the other panel's directory.
+- **Bulk rename**: open a textarea pre-filled with one filename per line; user edits; changes are applied as renames.
+- **File preview pane (F3 without Nano)**: a third vertical strip (or a horizontal split) showing a hex dump or text preview of the cursor file.
+- **Cross-filesystem move**: currently `F6 Move` fails with an EXDEV error. The fix is to fall back to `copy_recursive` + `delete_recursive` when `rename` returns `EXDEV`.
+- **Progress indicator**: long copy/move operations give no feedback. A progress bar overlay (driven by a Tokio channel that streams bytes-copied) would help.
+- **Bookmarks**: like recent dirs but user-managed (add/remove via a keybinding), persisted in config.
+- **Git merge and diff**: in git mode, show a diff of the cursor file (`git diff`); offer a merge tool launcher.
+- **SSH/SFTP panel**: one panel browses a remote host via SFTP (using the `ssh2` crate) while the other stays local. F5/F6 transfer between hosts.
