@@ -290,9 +290,17 @@ pub struct MenuCtx<'a> {
 
 This is also the seam through which plugins would add menu items (see below).
 
-### Architecture: generalizing `DeferredOp` for extensibility
+### ~~Architecture: generalizing `DeferredOp` for extensibility~~ **Implemented**
 
-`DeferredOp` is an enum, so adding a new operation requires touching `dialog.rs`, `app.rs`, and `action.rs`. A trait-based alternative:
+`DeferredOp` is now a trait in `src/ops.rs`. Each operation is its own `Debug + Send + Sync` struct in `app.rs`. `DialogState` holds `Box<dyn DeferredOp>`. `App::execute_op` shrinks to `op.execute(ctx)`. `OpGitCreateBranch::stays_in_git_mode()` returns `true` so `dialog_confirm` knows to restore `Mode::Git` instead of `Mode::Normal`. The old `DeferredOp` enum is fully removed.
+
+Adding a new operation now only requires:
+1. A new struct in `app.rs` (or any module) that implements `DeferredOp`
+2. One `Box::new(MyOp { .. })` call at the dialog open site
+
+No changes to the enum, `dialog.rs`, or the `execute_op` match arm are needed.
+
+The original spec for reference:
 
 ```rust
 pub trait DeferredOp: Send + Sync + std::fmt::Debug {
@@ -356,7 +364,7 @@ This is the minimum viable plugin architecture. It intentionally does not expose
 - **Bulk rename**: open a textarea pre-filled with one filename per line; user edits; changes are applied as renames.
 - **File preview pane (F3 without Nano)**: a third vertical strip (or a horizontal split) showing a hex dump or text preview of the cursor file.
 - **Cross-filesystem move**: currently `F6 Move` fails with an EXDEV error. The fix is to fall back to `copy_recursive` + `delete_recursive` when `rename` returns `EXDEV`.
-- **Progress indicator**: long copy/move operations give no feedback. A progress bar overlay (driven by a Tokio channel that streams bytes-copied) would help.
+- ~~**Progress indicator**: long copy/move operations give no feedback. A progress bar overlay (driven by a Tokio channel that streams bytes-copied) would help.~~ **Implemented.** `Action::Progress { id, label, done, total }` / `Action::ProgressDone(id)` flow through the event loop into `App::ops`. A `draw_ops_overlay` renders a bottom-right popup with `█░` fill bars. Copy, move, delete, git push, and git pull all emit progress (push/pull use git2 transfer-progress callbacks).
 - **Bookmarks**: like recent dirs but user-managed (add/remove via a keybinding), persisted in config.
 - **Git merge and diff**: in git mode, show a diff of the cursor file (`git diff`); offer a merge tool launcher.
 - **SSH/SFTP panel**: one panel browses a remote host via SFTP (using the `ssh2` crate) while the other stays local. F5/F6 transfer between hosts.

@@ -5,6 +5,7 @@ use crate::app::App;
 
 mod action;
 mod app;
+mod ops;
 mod cli;
 mod components;
 mod config;

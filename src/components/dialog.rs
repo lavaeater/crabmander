@@ -5,19 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-// --- Deferred operations resolved on dialog confirmation ---
-
-#[derive(Debug, Clone)]
-pub enum DeferredOp {
-    Delete(Vec<PathBuf>),
-    Copy { sources: Vec<PathBuf> },
-    Move { sources: Vec<PathBuf> },
-    Mkdir { base: PathBuf },
-    Execute { path: PathBuf },
-    OpenInNano { base: PathBuf },
-    ChownFiles { paths: Vec<PathBuf>, reload_sides: Vec<crate::action::Side> },
-    GitCreateBranch { git_root: PathBuf },
-}
+pub use crate::ops::DeferredOp;
 
 // --- Context menu ---
 
@@ -51,18 +39,18 @@ impl MenuItem {
 
 // --- Dialog state ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum DialogState {
     Confirm {
         title: String,
         message: String,
-        op: DeferredOp,
+        op: Box<dyn DeferredOp>,
     },
     Input {
         title: String,
         prompt: String,
         value: String,
-        op: DeferredOp,
+        op: Box<dyn DeferredOp>,
     },
     ContextMenu {
         title: String,
@@ -83,7 +71,7 @@ pub enum DialogState {
 }
 
 impl DialogState {
-    pub fn confirm(title: impl Into<String>, message: impl Into<String>, op: DeferredOp) -> Self {
+    pub fn confirm(title: impl Into<String>, message: impl Into<String>, op: Box<dyn DeferredOp>) -> Self {
         Self::Confirm {
             title: title.into(),
             message: message.into(),
@@ -95,7 +83,7 @@ impl DialogState {
         title: impl Into<String>,
         prompt: impl Into<String>,
         default: impl Into<String>,
-        op: DeferredOp,
+        op: Box<dyn DeferredOp>,
     ) -> Self {
         Self::Input {
             title: title.into(),
@@ -371,8 +359,13 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
 
-    fn dummy_op() -> DeferredOp {
-        DeferredOp::Mkdir { base: std::path::PathBuf::from("/tmp") }
+    fn dummy_op() -> Box<dyn DeferredOp> {
+        #[derive(Debug)]
+        struct Noop;
+        impl DeferredOp for Noop {
+            fn execute(self: Box<Self>, _ctx: crate::ops::OpCtx) {}
+        }
+        Box::new(Noop)
     }
 
     fn menu_items(n: usize) -> Vec<MenuItem> {

@@ -9,12 +9,13 @@ use crate::{
     action::{Action, BranchInfo, Side},
     components::{
         context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
-        dialog::{self, DeferredOp, DialogState, MenuAction, MenuItem},
+        dialog::{self, DialogState, MenuAction, MenuItem},
         func_bar,
         git_view::GitView,
         panel::{Panel, copy_recursive, delete_recursive, extract_archive, file_name_of},
     },
     config::{Config, get_data_dir},
+    ops::{DeferredOp, OpCtx},
     palette::Palette,
     recent_dirs,
     tui::{Event, Tui},
@@ -686,11 +687,12 @@ impl App {
             .to_string_lossy()
             .into_owned();
         let label = target_label(&sources);
+        let active = self.active;
         self.open_dialog(DialogState::input(
             "Copy",
             format!("Copy {} to:", label),
             dest,
-            DeferredOp::Copy { sources },
+            Box::new(OpCopy { sources, active }),
         ));
     }
 
@@ -705,21 +707,23 @@ impl App {
             .to_string_lossy()
             .into_owned();
         let label = target_label(&sources);
+        let active = self.active;
         self.open_dialog(DialogState::input(
             "Move",
             format!("Move {} to:", label),
             dest,
-            DeferredOp::Move { sources },
+            Box::new(OpMove { sources, active }),
         ));
     }
 
     fn open_mkdir_dialog(&mut self) {
         let base = self.active_panel().path.clone();
+        let active = self.active;
         self.open_dialog(DialogState::input(
             "Make Directory",
             "New directory name:",
             "",
-            DeferredOp::Mkdir { base },
+            Box::new(OpMkdir { base, active }),
         ));
     }
 
@@ -739,10 +743,11 @@ impl App {
         } else {
             format!("Delete {} items?", sources.len())
         };
+        let active = self.active;
         self.open_dialog(DialogState::confirm(
             "Delete",
             msg,
-            DeferredOp::Delete(sources),
+            Box::new(OpDelete { paths: sources, active }),
         ));
     }
 
@@ -758,7 +763,7 @@ impl App {
             "Open in Nano",
             format!("File in {}:", base.display()),
             prefill,
-            DeferredOp::OpenInNano { base },
+            Box::new(OpOpenInNano { base }),
         ));
     }
 
@@ -839,20 +844,12 @@ impl App {
             DialogState::Confirm { op, .. } => {
                 self.mode = Mode::Normal;
                 self.last_error = None;
-                self.execute_op(op, None);
+                self.execute_op(op, String::new());
             }
             DialogState::Input { value, op, .. } => {
                 self.last_error = None;
-                if let DeferredOp::GitCreateBranch { git_root } = op {
-                    let name = value.trim().to_owned();
-                    if !name.is_empty() {
-                        self.mode = Mode::Git;
-                        self.do_git_create_branch(git_root, name);
-                    }
-                } else {
-                    self.mode = Mode::Normal;
-                    self.execute_op(op, Some(value));
-                }
+                self.mode = if op.stays_in_git_mode() { Mode::Git } else { Mode::Normal };
+                self.execute_op(op, value);
             }
             DialogState::ContextMenu {
                 items, selected, ..
@@ -910,7 +907,7 @@ impl App {
                         path.file_name().unwrap_or_default().to_string_lossy()
                     ),
                     "",
-                    DeferredOp::Execute { path },
+                    Box::new(OpExecute { path }),
                 ));
             }
             MenuAction::ExtractHere { archive, dest } => {
@@ -985,78 +982,26 @@ impl App {
                         current_owner
                     ),
                     current_owner,
-                    DeferredOp::ChownFiles { paths, reload_sides },
+                    Box::new(OpChown { paths, reload_sides }),
                 ));
             }
         }
     }
 
-    fn execute_op(&mut self, op: DeferredOp, value: Option<String>) {
-        let tx = self.action_tx.clone();
-        let active = self.active;
+    fn make_op_ctx(&mut self, input: String) -> OpCtx {
+        let op_id = self.next_op_id;
+        self.next_op_id += 1;
+        OpCtx { tx: self.action_tx.clone(), op_id, input }
+    }
 
-        match op {
-            DeferredOp::Delete(paths) => self.do_delete(paths),
-
-            DeferredOp::Copy { sources } => {
-                let dest: std::path::PathBuf = value.unwrap_or_default().into();
-                self.do_copy(sources, dest, active);
-            }
-
-            DeferredOp::Move { sources } => {
-                let dest: std::path::PathBuf = value.unwrap_or_default().into();
-                self.do_move(sources, dest, active);
-            }
-
-            DeferredOp::Mkdir { base } => {
-                let name = value.unwrap_or_default();
-                self.do_mkdir(base.join(name), active);
-            }
-
-            DeferredOp::OpenInNano { base } => {
-                let filename = value.unwrap_or_default();
-                if !filename.is_empty() {
-                    let path = base.join(&filename).to_string_lossy().into_owned();
-                    let _ = tx.send(Action::ExecuteFile {
-                        cmd: "nano".into(),
-                        args: vec![path],
-                        reload: vec![],
-                    });
-                }
-            }
-
-            DeferredOp::Execute { path } => {
-                let cmd = path.to_string_lossy().into_owned();
-                let args_str = value.unwrap_or_default();
-                let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
-                let _ = tx.send(Action::ExecuteFile { cmd, args, reload: vec![] });
-            }
-
-            DeferredOp::ChownFiles { paths, reload_sides } => {
-                let new_owner = value.unwrap_or_default();
-                if !new_owner.is_empty() {
-                    let recursive = paths.iter().any(|p| p.is_dir());
-                    let mut args: Vec<String> = vec!["chown".into()];
-                    if recursive {
-                        args.push("-R".into());
-                    }
-                    args.push(new_owner);
-                    args.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
-                    let _ = tx.send(Action::ExecuteFile {
-                        cmd: "sudo".into(),
-                        args,
-                        reload: reload_sides,
-                    });
-                }
-            }
-
-            // Handled directly in dialog_confirm before execute_op is called.
-            DeferredOp::GitCreateBranch { .. } => {}
-        }
+    fn execute_op(&mut self, op: Box<dyn DeferredOp>, input: String) {
+        let ctx = self.make_op_ctx(input);
+        op.execute(ctx);
     }
 
     // --- Async file ops ---
 
+    // Called from ExecuteDelete/ExecuteCopy/ExecuteMove/ExecuteMkdir actions (legacy path).
     fn do_delete(&mut self, paths: Vec<std::path::PathBuf>) {
         let tx = self.action_tx.clone();
         let active = self.active;
@@ -1422,29 +1367,8 @@ impl App {
             "New Branch",
             "Branch name:",
             String::new(),
-            DeferredOp::GitCreateBranch { git_root },
+            Box::new(OpGitCreateBranch { git_root }),
         ));
-    }
-
-    fn do_git_create_branch(&mut self, git_root: std::path::PathBuf, name: String) {
-        let tx = self.action_tx.clone();
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let repo = git2::Repository::open(&git_root)?;
-                let head_commit = repo.head()?.peel_to_commit()?;
-                let mut branch = repo.branch(&name, &head_commit, false)?;
-                // Set upstream to origin/<name> if origin exists.
-                if repo.find_remote("origin").is_ok() {
-                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
-                }
-                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
-                repo.checkout_tree(&obj, None)?;
-                repo.set_head(&format!("refs/heads/{}", name))?;
-                Ok::<_, git2::Error>(())
-            })
-            .await;
-            git_op_result(result, &tx);
-        });
     }
 
     fn do_git_list_branches(&mut self) {
@@ -1484,6 +1408,234 @@ impl App {
                     repo.checkout_tree(&obj, None)?;
                     repo.set_head(&format!("refs/heads/{}", info.name))?;
                 }
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+}
+
+// --- DeferredOp implementations ---
+
+#[derive(Debug)]
+struct OpDelete {
+    paths: Vec<std::path::PathBuf>,
+    active: Side,
+}
+impl DeferredOp for OpDelete {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let tx = ctx.tx;
+        let active = self.active;
+        let id = ctx.op_id;
+        let total = self.paths.len() as u64;
+        tokio::spawn(async move {
+            let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: 0, total });
+            for (i, path) in self.paths.iter().enumerate() {
+                if let Err(e) = delete_recursive(path).await {
+                    let _ = tx.send(Action::ProgressDone(id));
+                    let _ = tx.send(Action::OpError(e.to_string()));
+                    return;
+                }
+                let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: (i + 1) as u64, total });
+            }
+            let _ = tx.send(Action::ProgressDone(id));
+            let _ = tx.send(Action::OpCompleted(vec![active]));
+        });
+    }
+}
+
+#[derive(Debug)]
+struct OpCopy {
+    sources: Vec<std::path::PathBuf>,
+    active: Side,
+}
+impl DeferredOp for OpCopy {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let dest: std::path::PathBuf = ctx.input.into();
+        let tx = ctx.tx;
+        let active = self.active;
+        let id = ctx.op_id;
+        let total = self.sources.len() as u64;
+        tokio::spawn(async move {
+            let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: 0, total });
+            let mut errors: Vec<String> = Vec::new();
+            let mut succeeded = 0usize;
+            for (i, src) in self.sources.iter().enumerate() {
+                let name = match file_name_of(src) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        errors.push(format!("{}: {}", src.display(), e));
+                        let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
+                        continue;
+                    }
+                };
+                if let Err(e) = copy_recursive(src, &dest.join(&name)).await {
+                    errors.push(format!("{}: {}", src.display(), e));
+                } else {
+                    succeeded += 1;
+                }
+                let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
+            }
+            let _ = tx.send(Action::ProgressDone(id));
+            if succeeded > 0 {
+                let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+            }
+            if !errors.is_empty() {
+                let _ = tx.send(Action::OpErrors(errors));
+            }
+        });
+    }
+}
+
+#[derive(Debug)]
+struct OpMove {
+    sources: Vec<std::path::PathBuf>,
+    active: Side,
+}
+impl DeferredOp for OpMove {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let dest: std::path::PathBuf = ctx.input.into();
+        let tx = ctx.tx;
+        let active = self.active;
+        let id = ctx.op_id;
+        let total = self.sources.len() as u64;
+        tokio::spawn(async move {
+            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: 0, total });
+            let mut errors: Vec<String> = Vec::new();
+            let mut succeeded = 0usize;
+            for (i, src) in self.sources.iter().enumerate() {
+                let name = match file_name_of(src) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        errors.push(format!("{}: {}", src.display(), e));
+                        let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                        continue;
+                    }
+                };
+                let dest_full = dest.join(&name);
+                match tokio::fs::rename(src, &dest_full).await {
+                    Ok(()) => succeeded += 1,
+                    Err(e) => {
+                        let detail = if e.raw_os_error() == Some(libc::EXDEV) {
+                            format!("{}: cannot move across filesystems (use Copy then Delete)", src.display())
+                        } else {
+                            format!("{}: {}", src.display(), e)
+                        };
+                        errors.push(detail);
+                    }
+                }
+                let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+            }
+            let _ = tx.send(Action::ProgressDone(id));
+            if succeeded > 0 {
+                let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+            }
+            if !errors.is_empty() {
+                let _ = tx.send(Action::OpErrors(errors));
+            }
+        });
+    }
+}
+
+#[derive(Debug)]
+struct OpMkdir {
+    base: std::path::PathBuf,
+    active: Side,
+}
+impl DeferredOp for OpMkdir {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let path = self.base.join(ctx.input.trim());
+        let tx = ctx.tx;
+        let active = self.active;
+        tokio::spawn(async move {
+            if let Err(e) = tokio::fs::create_dir(&path).await {
+                let _ = tx.send(Action::OpError(e.to_string()));
+                return;
+            }
+            let _ = tx.send(Action::OpCompleted(vec![active]));
+        });
+    }
+}
+
+#[derive(Debug)]
+struct OpOpenInNano {
+    base: std::path::PathBuf,
+}
+impl DeferredOp for OpOpenInNano {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let filename = ctx.input;
+        if !filename.is_empty() {
+            let path = self.base.join(&filename).to_string_lossy().into_owned();
+            let _ = ctx.tx.send(Action::ExecuteFile {
+                cmd: "nano".into(),
+                args: vec![path],
+                reload: vec![],
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OpExecute {
+    path: std::path::PathBuf,
+}
+impl DeferredOp for OpExecute {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let cmd = self.path.to_string_lossy().into_owned();
+        let args: Vec<String> = ctx.input.split_whitespace().map(String::from).collect();
+        let _ = ctx.tx.send(Action::ExecuteFile { cmd, args, reload: vec![] });
+    }
+}
+
+#[derive(Debug)]
+struct OpChown {
+    paths: Vec<std::path::PathBuf>,
+    reload_sides: Vec<Side>,
+}
+impl DeferredOp for OpChown {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let new_owner = ctx.input;
+        if !new_owner.is_empty() {
+            let recursive = self.paths.iter().any(|p| p.is_dir());
+            let mut args: Vec<String> = vec!["chown".into()];
+            if recursive {
+                args.push("-R".into());
+            }
+            args.push(new_owner);
+            args.extend(self.paths.iter().map(|p| p.to_string_lossy().into_owned()));
+            let _ = ctx.tx.send(Action::ExecuteFile {
+                cmd: "sudo".into(),
+                args,
+                reload: self.reload_sides,
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OpGitCreateBranch {
+    git_root: std::path::PathBuf,
+}
+impl DeferredOp for OpGitCreateBranch {
+    fn stays_in_git_mode(&self) -> bool { true }
+
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let name = ctx.input.trim().to_owned();
+        if name.is_empty() { return; }
+        let tx = ctx.tx;
+        let git_root = self.git_root;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let head_commit = repo.head()?.peel_to_commit()?;
+                let mut branch = repo.branch(&name, &head_commit, false)?;
+                if repo.find_remote("origin").is_ok() {
+                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                }
+                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                repo.checkout_tree(&obj, None)?;
+                repo.set_head(&format!("refs/heads/{}", name))?;
                 Ok::<_, git2::Error>(())
             })
             .await;
