@@ -54,6 +54,9 @@ pub struct App {
     git_watcher: Option<tokio_util::sync::CancellationToken>,
     providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
+    /// Active long-running operations: (id, label, done, total).
+    ops: Vec<(u64, String, u64, u64)>,
+    next_op_id: u64,
     should_quit: bool,
     should_suspend: bool,
     last_tick_key_events: Vec<KeyEvent>,
@@ -98,6 +101,8 @@ impl App {
             git_watcher: None,
             providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
+            ops: Vec::new(),
+            next_op_id: 0,
             should_quit: false,
             should_suspend: false,
             last_tick_key_events: Vec::new(),
@@ -540,6 +545,18 @@ impl App {
                     self.branch_list = branches;
                     self.mode = Mode::GitBranch;
                 }
+                Action::Progress { id, label, done, total } => {
+                    if let Some(op) = self.ops.iter_mut().find(|o| o.0 == id) {
+                        op.2 = done;
+                        op.3 = total;
+                    } else {
+                        self.ops.push((id, label, done, total));
+                    }
+                }
+                Action::ProgressDone(id) => {
+                    self.ops.retain(|o| o.0 != id);
+                }
+
                 Action::GitReload | Action::GitOpCompleted => {
                     if let Some(gv) = &self.git_view {
                         GitView::load_status(gv.git_root.clone(), self.action_tx.clone());
@@ -570,6 +587,7 @@ impl App {
         let branch_cursor = self.branch_cursor;
         let show_branches = self.mode == Mode::GitBranch;
         let palette = &self.palette;
+        let ops = &self.ops;
 
         tui.draw(|frame| {
             let area = frame.area();
@@ -608,6 +626,8 @@ impl App {
             if let Some(d) = dialog {
                 dialog::draw(frame, d, area, palette);
             }
+
+            draw_ops_overlay(frame, area, ops, palette);
         })?;
         Ok(())
     }
@@ -971,7 +991,7 @@ impl App {
         }
     }
 
-    fn execute_op(&self, op: DeferredOp, value: Option<String>) {
+    fn execute_op(&mut self, op: DeferredOp, value: Option<String>) {
         let tx = self.action_tx.clone();
         let active = self.active;
 
@@ -1037,30 +1057,42 @@ impl App {
 
     // --- Async file ops ---
 
-    fn do_delete(&self, paths: Vec<std::path::PathBuf>) {
+    fn do_delete(&mut self, paths: Vec<std::path::PathBuf>) {
         let tx = self.action_tx.clone();
         let active = self.active;
+        let id = self.next_op_id;
+        self.next_op_id += 1;
+        let total = paths.len() as u64;
         tokio::spawn(async move {
-            for path in &paths {
+            let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: 0, total });
+            for (i, path) in paths.iter().enumerate() {
                 if let Err(e) = delete_recursive(path).await {
+                    let _ = tx.send(Action::ProgressDone(id));
                     let _ = tx.send(Action::OpError(e.to_string()));
                     return;
                 }
+                let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: (i + 1) as u64, total });
             }
+            let _ = tx.send(Action::ProgressDone(id));
             let _ = tx.send(Action::OpCompleted(vec![active]));
         });
     }
 
-    fn do_copy(&self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
+    fn do_copy(&mut self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
+        let id = self.next_op_id;
+        self.next_op_id += 1;
+        let total = sources.len() as u64;
         tokio::spawn(async move {
+            let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: 0, total });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
-            for src in &sources {
+            for (i, src) in sources.iter().enumerate() {
                 let name = match file_name_of(src) {
                     Ok(n) => n,
                     Err(e) => {
                         errors.push(format!("{}: {}", src.display(), e));
+                        let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
                         continue;
                     }
                 };
@@ -1069,7 +1101,9 @@ impl App {
                 } else {
                     succeeded += 1;
                 }
+                let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
             }
+            let _ = tx.send(Action::ProgressDone(id));
             if succeeded > 0 {
                 let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
             }
@@ -1079,16 +1113,21 @@ impl App {
         });
     }
 
-    fn do_move(&self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
+    fn do_move(&mut self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
         let tx = self.action_tx.clone();
+        let id = self.next_op_id;
+        self.next_op_id += 1;
+        let total = sources.len() as u64;
         tokio::spawn(async move {
+            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: 0, total });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
-            for src in &sources {
+            for (i, src) in sources.iter().enumerate() {
                 let name = match file_name_of(src) {
                     Ok(n) => n,
                     Err(e) => {
                         errors.push(format!("{}: {}", src.display(), e));
+                        let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
                         continue;
                     }
                 };
@@ -1104,7 +1143,9 @@ impl App {
                         errors.push(detail);
                     }
                 }
+                let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
             }
+            let _ = tx.send(Action::ProgressDone(id));
             if succeeded > 0 {
                 let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
             }
@@ -1276,7 +1317,11 @@ impl App {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
+        let id = self.next_op_id;
+        self.next_op_id += 1;
+        let _ = tx.send(Action::Progress { id, label: "Pushing…".into(), done: 0, total: 0 });
         tokio::spawn(async move {
+            let tx_inner = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let repo = git2::Repository::open(&git_root)?;
                 let branch = repo
@@ -1287,6 +1332,15 @@ impl App {
                 let mut remote = repo.find_remote("origin")?;
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(git2_cred_callback);
+                let tx_cb = tx_inner.clone();
+                callbacks.push_transfer_progress(move |current, total, _bytes| {
+                    let _ = tx_cb.send(Action::Progress {
+                        id,
+                        label: "Pushing…".into(),
+                        done: current as u64,
+                        total: total as u64,
+                    });
+                });
                 let mut push_opts = git2::PushOptions::new();
                 push_opts.remote_callbacks(callbacks);
                 let refspec = format!("refs/heads/{0}:refs/heads/{0}", branch);
@@ -1294,6 +1348,7 @@ impl App {
                 Ok::<_, git2::Error>(())
             })
             .await;
+            let _ = tx.send(Action::ProgressDone(id));
             git_op_result(result, &tx);
         });
     }
@@ -1302,7 +1357,11 @@ impl App {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
+        let id = self.next_op_id;
+        self.next_op_id += 1;
+        let _ = tx.send(Action::Progress { id, label: "Pulling…".into(), done: 0, total: 0 });
         tokio::spawn(async move {
+            let tx_inner = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let repo = git2::Repository::open(&git_root)?;
                 let branch = repo
@@ -1313,6 +1372,16 @@ impl App {
                 let mut remote = repo.find_remote("origin")?;
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(git2_cred_callback);
+                let tx_cb = tx_inner.clone();
+                callbacks.transfer_progress(move |stats| {
+                    let _ = tx_cb.send(Action::Progress {
+                        id,
+                        label: "Pulling…".into(),
+                        done: stats.received_objects() as u64,
+                        total: stats.total_objects() as u64,
+                    });
+                    true
+                });
                 let mut fetch_opts = git2::FetchOptions::new();
                 fetch_opts.remote_callbacks(callbacks);
                 remote.fetch(&[] as &[&str], Some(&mut fetch_opts), None)?;
@@ -1340,6 +1409,7 @@ impl App {
                 Ok::<_, git2::Error>(())
             })
             .await;
+            let _ = tx.send(Action::ProgressDone(id));
             git_op_result(result, &tx);
         });
     }
@@ -1616,6 +1686,54 @@ fn draw_branch_popup(
 
     let list_area = Rect { height: list_h as u16, ..inner };
     frame.render_widget(List::new(items), list_area);
+}
+
+fn draw_ops_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    ops: &[(u64, String, u64, u64)],
+    palette: &Palette,
+) {
+    use ratatui::widgets::{Block, Borders, Paragraph};
+
+    let n = ops.len() as u16;
+    if n == 0 {
+        return;
+    }
+
+    let width = 44u16.min(area.width);
+    let height = n + 2;
+    let x = area.x + area.width.saturating_sub(width);
+    let y = area.y + area.height.saturating_sub(height);
+    let popup = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(palette.border_active)
+        .title(" Working… ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    for (i, (_, label, done, total)) in ops.iter().enumerate() {
+        let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+        let text = if *total == 0 {
+            format!("{label}")
+        } else {
+            let t = (*total).max(1);
+            let d = *done;
+            let bar_w = inner.width.saturating_sub(label.len() as u16 + 7) as usize;
+            let filled = (bar_w as u64 * d / t) as usize;
+            let empty = bar_w.saturating_sub(filled);
+            format!(
+                "{label} {:>3}% {}{}",
+                d * 100 / t,
+                "█".repeat(filled),
+                "░".repeat(empty)
+            )
+        };
+        frame.render_widget(Paragraph::new(text).style(palette.status_normal), row);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

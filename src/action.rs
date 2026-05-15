@@ -203,6 +203,16 @@ pub enum Action {
         branches: Vec<BranchInfo>,
     },
     GitOpCompleted,
+
+    // Progress tracking for long-running operations
+    #[strum(to_string = "Progress")]
+    Progress {
+        id: u64,
+        label: String,
+        done: u64,
+        total: u64,
+    },
+    ProgressDone(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
