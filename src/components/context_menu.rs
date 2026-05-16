@@ -73,21 +73,42 @@ pub struct ArchiveProvider;
 
 impl ContextMenuProvider for ArchiveProvider {
     fn items(&self, ctx: &MenuCtx) -> Vec<MenuItem> {
-        if ctx.entry.is_dir || !is_archive(&ctx.entry.name) {
+        let archives: Vec<std::path::PathBuf> = ctx
+            .effective_targets
+            .iter()
+            .filter(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                is_archive(&name)
+            })
+            .cloned()
+            .collect();
+
+        if archives.is_empty() {
             return vec![];
         }
+
+        let label = if archives.len() == 1 {
+            archives[0]
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            format!("{} archives", archives.len())
+        };
+
         vec![
             MenuItem::new(
-                "Extract here",
+                format!("Extract {label} here"),
                 MenuAction::ExtractHere {
-                    archive: ctx.entry_path.clone(),
+                    archives: archives.clone(),
                     dest: ctx.panel_dir.clone(),
                 },
             ),
             MenuItem::new(
-                format!("Extract to → {}", ctx.other_dir.display()),
+                format!("Extract {label} to → {}", ctx.other_dir.display()),
                 MenuAction::ExtractHere {
-                    archive: ctx.entry_path.clone(),
+                    archives,
                     dest: ctx.other_dir.clone(),
                 },
             ),

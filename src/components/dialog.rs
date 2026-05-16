@@ -14,7 +14,7 @@ pub enum MenuAction {
     OpenWithOs(PathBuf),
     RunCodeHere(PathBuf),
     RequestExecute(PathBuf), // opens an args Input dialog, then runs
-    ExtractHere { archive: PathBuf, dest: PathBuf },
+    ExtractHere { archives: Vec<PathBuf>, dest: PathBuf },
     MountDevice { device: String },
     UnmountDevice { device: String },
     Chown { paths: Vec<PathBuf>, current_owner: String, reload_sides: Vec<crate::action::Side> },

@@ -104,11 +104,16 @@ impl Panel {
         self.entries = entries;
         if path_changed {
             self.filter.clear();
+            self.marked.clear();
             self.dir_sizes.clear();
             self.sizes_calculating = false;
             self.sizes_pending = 0;
             self.git_branch = None;
             self.git_dirty = false;
+        } else {
+            // Prune marks for files that no longer exist after a reload.
+            let existing: HashSet<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
+            self.marked.retain(|name| existing.contains(name.as_str()));
         }
         self.rebuild_view();
 
@@ -674,56 +679,62 @@ pub async fn delete_recursive(path: &Path) -> color_eyre::Result<()> {
     Ok(())
 }
 
-pub async fn extract_archive(archive: &Path, dest: &Path) -> color_eyre::Result<()> {
-    use tokio::process::Command;
-    tokio::fs::create_dir_all(dest).await?;
+/// Extract a single archive to `dest` using pure-Rust (or bundled-C) crates.
+/// Runs synchronously; call from `tokio::task::spawn_blocking`.
+pub fn extract_archive_sync(archive: &Path, dest: &Path) -> color_eyre::Result<()> {
+    use std::fs::File;
+
+    std::fs::create_dir_all(dest)?;
 
     let name = archive
         .file_name()
         .unwrap_or_default()
         .to_string_lossy()
         .to_lowercase();
-    let a = archive.to_string_lossy();
-    let d = dest.to_string_lossy();
 
-    let status = if name.ends_with(".zip") {
-        Command::new("unzip")
-            .args([a.as_ref(), "-d", d.as_ref()])
-            .status()
-            .await?
-    } else if name.ends_with(".tar.gz")
-        || name.ends_with(".tgz")
-        || name.ends_with(".tar.bz2")
-        || name.ends_with(".tbz2")
-        || name.ends_with(".tar.xz")
-        || name.ends_with(".txz")
-        || name.ends_with(".tar.zst")
-        || name.ends_with(".tar")
-    {
-        Command::new("tar")
-            .args(["-xf", a.as_ref(), "-C", d.as_ref()])
-            .status()
-            .await?
-    } else if name.ends_with(".7z") {
-        Command::new("7z")
-            .args(["x", a.as_ref(), &format!("-o{}", d)])
-            .status()
-            .await?
-    } else if name.ends_with(".rar") {
-        Command::new("unrar")
-            .args(["x", a.as_ref(), d.as_ref()])
-            .status()
-            .await?
+    let file = File::open(archive)?;
+
+    if name.ends_with(".zip") {
+        let mut zip = zip::ZipArchive::new(file)?;
+        zip.extract(dest)?;
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        let gz = flate2::read::GzDecoder::new(file);
+        tar::Archive::new(gz).unpack(dest)?;
+    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
+        let bz = bzip2::read::BzDecoder::new(file);
+        tar::Archive::new(bz).unpack(dest)?;
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
+        let xz = xz2::read::XzDecoder::new(file);
+        tar::Archive::new(xz).unpack(dest)?;
+    } else if name.ends_with(".tar.zst") {
+        let zst = zstd::Decoder::new(file)?;
+        tar::Archive::new(zst).unpack(dest)?;
+    } else if name.ends_with(".tar") {
+        tar::Archive::new(file).unpack(dest)?;
+    } else if name.ends_with(".gz") {
+        let stem = name.strip_suffix(".gz").unwrap();
+        let mut gz = flate2::read::GzDecoder::new(file);
+        let mut out = std::fs::File::create(dest.join(stem))?;
+        std::io::copy(&mut gz, &mut out)?;
+    } else if name.ends_with(".bz2") {
+        let stem = name.strip_suffix(".bz2").unwrap();
+        let mut bz = bzip2::read::BzDecoder::new(file);
+        let mut out = std::fs::File::create(dest.join(stem))?;
+        std::io::copy(&mut bz, &mut out)?;
+    } else if name.ends_with(".xz") {
+        let stem = name.strip_suffix(".xz").unwrap();
+        let mut xz = xz2::read::XzDecoder::new(file);
+        let mut out = std::fs::File::create(dest.join(stem))?;
+        std::io::copy(&mut xz, &mut out)?;
+    } else if name.ends_with(".zst") {
+        let stem = name.strip_suffix(".zst").unwrap();
+        let mut zst = zstd::Decoder::new(file)?;
+        let mut out = std::fs::File::create(dest.join(stem))?;
+        std::io::copy(&mut zst, &mut out)?;
     } else {
         return Err(eyre!("Unsupported archive type: {}", name));
-    };
-
-    if !status.success() {
-        return Err(eyre!(
-            "Extraction failed (exit {})",
-            status.code().unwrap_or(-1)
-        ));
     }
+
     Ok(())
 }
 

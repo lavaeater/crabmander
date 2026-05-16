@@ -12,7 +12,7 @@ use crate::{
         dialog::{self, DialogState, MenuAction, MenuItem},
         func_bar,
         git_view::GitView,
-        panel::{Panel, copy_recursive, delete_recursive, extract_archive, file_name_of},
+        panel::{Panel, copy_recursive, delete_recursive, extract_archive_sync, file_name_of},
     },
     config::{Config, get_data_dir},
     ops::{DeferredOp, OpCtx},
@@ -910,17 +910,45 @@ impl App {
                     Box::new(OpExecute { path }),
                 ));
             }
-            MenuAction::ExtractHere { archive, dest } => {
+            MenuAction::ExtractHere { archives, dest } => {
                 let active = self.active;
                 let tx = self.action_tx.clone();
+                let id = self.next_op_id;
+                self.next_op_id += 1;
+                let total = archives.len() as u64;
                 tokio::spawn(async move {
-                    match extract_archive(&archive, &dest).await {
-                        Ok(()) => {
-                            let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+                    let _ = tx.send(Action::Progress {
+                        id,
+                        label: "Extracting…".into(),
+                        done: 0,
+                        total,
+                    });
+                    let mut errors: Vec<String> = Vec::new();
+                    let mut succeeded = 0usize;
+                    for (i, archive) in archives.into_iter().enumerate() {
+                        let dest2 = dest.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            extract_archive_sync(&archive, &dest2)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => succeeded += 1,
+                            Ok(Err(e)) => errors.push(e.to_string()),
+                            Err(e) => errors.push(e.to_string()),
                         }
-                        Err(e) => {
-                            let _ = tx.send(Action::OpError(e.to_string()));
-                        }
+                        let _ = tx.send(Action::Progress {
+                            id,
+                            label: "Extracting…".into(),
+                            done: (i + 1) as u64,
+                            total,
+                        });
+                    }
+                    let _ = tx.send(Action::ProgressDone(id));
+                    if succeeded > 0 {
+                        let _ = tx.send(Action::OpCompleted(vec![active, active.other()]));
+                    }
+                    if !errors.is_empty() {
+                        let _ = tx.send(Action::OpErrors(errors));
                     }
                 });
             }
