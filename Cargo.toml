@@ -43,11 +43,11 @@ tracing = "0.1.40"
 tracing-error = "0.2.0"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "serde"] }
 opaline = "0.4.0"
-notify = { version = "7", features = ["macos_kqueue"] }
-zip = "2"
+notify = { version = "8.2.0", features = ["macos_kqueue"] }
+zip = "8.6.0"
 tar = "0.4"
 flate2 = "1"
-bzip2 = "0.4"
+bzip2 = "0.6.1"
 xz2 = "0.1"
 zstd = "0.13"
 
