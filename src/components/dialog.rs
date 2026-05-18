@@ -20,6 +20,7 @@ pub enum MenuAction {
     Chown { paths: Vec<PathBuf>, current_owner: String, reload_sides: Vec<crate::action::Side> },
     SetTheme(String),
     CdTo(std::path::PathBuf),
+    GitPush { follow_tags: bool },
 }
 
 #[derive(Debug, Clone)]

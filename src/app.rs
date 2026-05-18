@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::{
-    action::{Action, BranchInfo, Side},
+    action::{Action, BranchInfo, Side, TagInfo},
     components::{
         context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
         dialog::{self, DialogState, MenuAction, MenuItem},
@@ -29,6 +29,7 @@ pub enum Mode {
     Git,
     GitCommit,
     GitBranch,
+    GitTag,
 }
 
 pub struct App {
@@ -52,6 +53,8 @@ pub struct App {
     commit_textarea: Option<TextArea<'static>>,
     branch_list: Vec<BranchInfo>,
     branch_cursor: usize,
+    tag_list: Vec<TagInfo>,
+    tag_cursor: usize,
     git_watcher: Option<tokio_util::sync::CancellationToken>,
     providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
@@ -99,6 +102,8 @@ impl App {
             commit_textarea: None,
             branch_list: Vec::new(),
             branch_cursor: 0,
+            tag_list: Vec::new(),
+            tag_cursor: 0,
             git_watcher: None,
             providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
@@ -252,6 +257,18 @@ impl App {
             return Ok(());
         }
 
+        if self.mode == Mode::GitTag {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
+                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitTagNavUp)?,
+                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitTagNavDown)?,
+                KeyCode::Enter => tx.send(Action::GitTagConfirm)?,
+                KeyCode::Char('d') => tx.send(Action::GitTagDelete)?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if self.mode == Mode::Git {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
@@ -268,6 +285,8 @@ impl App {
                 KeyCode::F(7) | KeyCode::Char('A') => tx.send(Action::GitAddAllAndCommit)?,
                 KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
                 KeyCode::Char('r') => tx.send(Action::GitReload)?,
+                KeyCode::Char('t') => tx.send(Action::GitCreateTag)?,
+                KeyCode::Char('T') => tx.send(Action::GitListTags)?,
                 _ => {}
             }
             return Ok(());
@@ -539,13 +558,38 @@ impl App {
                 }
                 Action::GitBranchConfirm => self.do_git_checkout_branch(),
                 Action::GitBranchesLoaded { branches } => {
-                    self.branch_cursor = branches
-                        .iter()
-                        .position(|b| b.is_current)
-                        .unwrap_or(0);
+                    self.branch_cursor = branches.iter().position(|b| b.is_current).unwrap_or(0);
                     self.branch_list = branches;
                     self.mode = Mode::GitBranch;
                 }
+
+                // Tags
+                Action::GitCreateTag => self.open_create_tag_dialog(),
+                Action::GitListTags => self.do_git_list_tags(),
+                Action::GitTagNameChosen { git_root, name } => {
+                    self.open_dialog(DialogState::input(
+                        "New Tag — Message",
+                        format!("Message for tag '{name}' (leave empty for lightweight tag):"),
+                        "",
+                        Box::new(OpGitCreateTag { git_root, name }),
+                    ));
+                }
+                Action::GitTagsLoaded { tags } => {
+                    self.tag_cursor = 0;
+                    self.tag_list = tags;
+                    self.mode = Mode::GitTag;
+                }
+                Action::GitTagNavUp => {
+                    self.tag_cursor = self.tag_cursor.saturating_sub(1);
+                }
+                Action::GitTagNavDown => {
+                    let max = self.tag_list.len().saturating_sub(1);
+                    self.tag_cursor = (self.tag_cursor + 1).min(max);
+                }
+                Action::GitTagConfirm => self.do_git_checkout_tag(),
+                Action::GitTagDelete => self.do_git_delete_tag(),
+                Action::GitPushFollowTags => self.do_git_push_inner(true),
+
                 Action::Progress { id, label, done, total } => {
                     if let Some(op) = self.ops.iter_mut().find(|o| o.0 == id) {
                         op.2 = done;
@@ -582,11 +626,14 @@ impl App {
         let dialog = &self.dialog;
         let last_error = &self.last_error;
         let git_view = &mut self.git_view;
-        let git_mode = matches!(self.mode, Mode::Git | Mode::GitCommit | Mode::GitBranch);
+        let git_mode = matches!(self.mode, Mode::Git | Mode::GitCommit | Mode::GitBranch | Mode::GitTag);
         let commit_textarea = &mut self.commit_textarea;
         let branch_list = &self.branch_list;
         let branch_cursor = self.branch_cursor;
         let show_branches = self.mode == Mode::GitBranch;
+        let show_tags = self.mode == Mode::GitTag;
+        let tag_list = &self.tag_list;
+        let tag_cursor = self.tag_cursor;
         let palette = &self.palette;
         let ops = &self.ops;
 
@@ -609,6 +656,9 @@ impl App {
                 }
                 if show_branches {
                     draw_branch_popup(frame, panels_area, branch_list, branch_cursor, palette);
+                }
+                if show_tags {
+                    draw_tag_popup(frame, panels_area, tag_list, tag_cursor, palette);
                 }
             } else {
                 let [left_area, right_area] =
@@ -1013,6 +1063,9 @@ impl App {
                     Box::new(OpChown { paths, reload_sides }),
                 ));
             }
+            MenuAction::GitPush { follow_tags } => {
+                self.do_git_push_inner(follow_tags);
+            }
         }
     }
 
@@ -1287,12 +1340,26 @@ impl App {
     }
 
     fn do_git_push(&mut self) {
+        self.open_dialog(DialogState::context_menu(
+            "Push",
+            vec![
+                MenuItem::new("Push branch only", MenuAction::GitPush { follow_tags: false }),
+                MenuItem::new(
+                    "Push branch + annotated tags (--follow-tags)",
+                    MenuAction::GitPush { follow_tags: true },
+                ),
+            ],
+        ));
+    }
+
+    fn do_git_push_inner(&mut self, follow_tags: bool) {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
         let id = self.next_op_id;
         self.next_op_id += 1;
-        let _ = tx.send(Action::Progress { id, label: "Pushing…".into(), done: 0, total: 0 });
+        let label = if follow_tags { "Pushing (with tags)…" } else { "Pushing…" };
+        let _ = tx.send(Action::Progress { id, label: label.into(), done: 0, total: 0 });
         tokio::spawn(async move {
             let tx_inner = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
@@ -1309,15 +1376,24 @@ impl App {
                 callbacks.push_transfer_progress(move |current, total, _bytes| {
                     let _ = tx_cb.send(Action::Progress {
                         id,
-                        label: "Pushing…".into(),
+                        label: label.into(),
                         done: current as u64,
                         total: total as u64,
                     });
                 });
                 let mut push_opts = git2::PushOptions::new();
                 push_opts.remote_callbacks(callbacks);
-                let refspec = format!("refs/heads/{0}:refs/heads/{0}", branch);
-                remote.push(&[refspec.as_str()], Some(&mut push_opts))?;
+                let branch_refspec = format!("refs/heads/{0}:refs/heads/{0}", branch);
+                let mut refspecs: Vec<String> = vec![branch_refspec];
+                if follow_tags {
+                    // Push all annotated tags whose target commits are reachable.
+                    let tag_refspec = "refs/tags/*:refs/tags/*".to_owned();
+                    refspecs.push(tag_refspec);
+                }
+                remote.push(
+                    &refspecs.iter().map(String::as_str).collect::<Vec<_>>(),
+                    Some(&mut push_opts),
+                )?;
                 Ok::<_, git2::Error>(())
             })
             .await;
@@ -1436,6 +1512,104 @@ impl App {
                     repo.checkout_tree(&obj, None)?;
                     repo.set_head(&format!("refs/heads/{}", info.name))?;
                 }
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+
+    // --- Tag operations ---
+
+    fn open_create_tag_dialog(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        self.open_dialog(DialogState::input(
+            "New Tag",
+            "Tag name:",
+            "",
+            Box::new(OpGitTagName { git_root }),
+        ));
+    }
+
+    fn do_git_list_tags(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let mut tags: Vec<TagInfo> = Vec::new();
+                repo.tag_foreach(|oid, name_bytes| {
+                    let name = std::str::from_utf8(name_bytes)
+                        .unwrap_or("")
+                        .trim_start_matches("refs/tags/")
+                        .to_owned();
+                    let (is_annotated, target_id, message) =
+                        if let Ok(tag_obj) = repo.find_tag(oid) {
+                            let msg = tag_obj
+                                .message()
+                                .map(|m| m.trim().to_owned())
+                                .filter(|m| !m.is_empty());
+                            let target = tag_obj
+                                .target_id()
+                                .to_string()[..8]
+                                .to_owned();
+                            (true, target, msg)
+                        } else {
+                            // Lightweight tag: the oid IS the commit oid.
+                            (false, oid.to_string()[..8].to_owned(), None)
+                        };
+                    tags.push(TagInfo { name, is_annotated, target_id, message });
+                    true
+                })?;
+                // Sort alphabetically; newest tags tend to have higher version strings.
+                tags.sort_by(|a, b| a.name.cmp(&b.name));
+                Ok::<_, git2::Error>(tags)
+            })
+            .await;
+            match result {
+                Ok(Ok(tags)) => { let _ = tx.send(Action::GitTagsLoaded { tags }); }
+                Ok(Err(e)) => { let _ = tx.send(Action::OpError(e.to_string())); }
+                Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
+            }
+        });
+    }
+
+    fn do_git_checkout_tag(&mut self) {
+        let Some(info) = self.tag_list.get(self.tag_cursor).cloned() else { return };
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        self.mode = Mode::Git;
+        self.tag_list.clear();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let obj = repo.revparse_single(&format!("refs/tags/{}", info.name))?;
+                // Peel to commit for checkout_tree (annotated tags wrap a commit).
+                let commit_obj = obj.peel(git2::ObjectType::Commit)?;
+                repo.checkout_tree(&commit_obj, None)?;
+                // Detach HEAD to the commit.
+                repo.set_head_detached(commit_obj.id())?;
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+
+    fn do_git_delete_tag(&mut self) {
+        let Some(info) = self.tag_list.get(self.tag_cursor).cloned() else { return };
+        let Some(gv) = &self.git_view else { return };
+        let git_root = gv.git_root.clone();
+        let tx = self.action_tx.clone();
+        self.mode = Mode::Git;
+        self.tag_list.clear();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                repo.tag_delete(&info.name)?;
                 Ok::<_, git2::Error>(())
             })
             .await;
@@ -1672,6 +1846,53 @@ impl DeferredOp for OpGitCreateBranch {
     }
 }
 
+#[derive(Debug)]
+struct OpGitTagName {
+    git_root: std::path::PathBuf,
+}
+impl DeferredOp for OpGitTagName {
+    fn stays_in_git_mode(&self) -> bool { true }
+
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let name = ctx.input.trim().to_owned();
+        if name.is_empty() { return; }
+        let _ = ctx.tx.send(Action::GitTagNameChosen { git_root: self.git_root, name });
+    }
+}
+
+#[derive(Debug)]
+struct OpGitCreateTag {
+    git_root: std::path::PathBuf,
+    name: String,
+}
+impl DeferredOp for OpGitCreateTag {
+    fn stays_in_git_mode(&self) -> bool { true }
+
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let message = ctx.input.trim().to_owned();
+        let name = self.name;
+        let git_root = self.git_root;
+        let tx = ctx.tx;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let repo = git2::Repository::open(&git_root)?;
+                let head = repo.head()?.peel_to_commit()?;
+                if message.is_empty() {
+                    // Lightweight tag.
+                    repo.tag_lightweight(&name, head.as_object(), false)?;
+                } else {
+                    // Annotated tag.
+                    let sig = repo.signature()?;
+                    repo.tag(&name, head.as_object(), &sig, &message, false)?;
+                }
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+}
+
 // --- Status bar ---
 
 fn draw_status_bar(
@@ -1770,10 +1991,10 @@ fn git2_cred_callback(
 ) -> Result<git2::Cred, git2::Error> {
     if allowed.contains(git2::CredentialType::SSH_KEY) {
         let user = username.unwrap_or("git");
-        if std::env::var_os("SSH_AUTH_SOCK").is_some() {
-            if let Ok(cred) = git2::Cred::ssh_key_from_agent(user) {
-                return Ok(cred);
-            }
+        if std::env::var_os("SSH_AUTH_SOCK").is_some()
+            && let Ok(cred) = git2::Cred::ssh_key_from_agent(user)
+        {
+            return Ok(cred);
         }
         // Fall back to key files in ~/.ssh
         let home = std::env::var("HOME").unwrap_or_default();
@@ -1868,6 +2089,81 @@ fn draw_branch_popup(
     frame.render_widget(List::new(items), list_area);
 }
 
+fn draw_tag_popup(
+    frame: &mut Frame,
+    area: Rect,
+    tags: &[TagInfo],
+    cursor: usize,
+    palette: &Palette,
+) {
+    use ratatui::widgets::{Block, Borders, List, ListItem};
+
+    let popup = centered_rect(64, 70, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(palette.border_active)
+        .title(" Tags — Enter checkout  d delete  Esc cancel ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if tags.is_empty() {
+        use ratatui::widgets::Paragraph;
+        frame.render_widget(
+            Paragraph::new("  No tags in this repository.")
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            inner,
+        );
+        return;
+    }
+
+    let legend_h = 1usize;
+    let list_h = inner.height.saturating_sub(legend_h as u16) as usize;
+    let offset = if cursor < list_h { 0 } else { cursor + 1 - list_h };
+
+    let items: Vec<ListItem> = tags
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_h)
+        .map(|(i, t)| {
+            let kind = if t.is_annotated { "annotated" } else { "lightweight" };
+            let msg_hint = t
+                .message
+                .as_deref()
+                .map(|m| {
+                    let short: String = m.chars().take(30).collect();
+                    format!("  {}", short)
+                })
+                .unwrap_or_default();
+            let label = format!(" [{}] {}  {}{}",  kind, t.target_id, t.name, msg_hint);
+            let style = if i == cursor {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    let legend_area = Rect {
+        x: inner.x,
+        y: inner.y + inner.height.saturating_sub(1),
+        width: inner.width,
+        height: 1,
+    };
+    use ratatui::widgets::Paragraph;
+    frame.render_widget(
+        Paragraph::new("  [annotated] has message  [lightweight] points directly to commit")
+            .style(Style::default().add_modifier(Modifier::DIM)),
+        legend_area,
+    );
+
+    let list_area = Rect { height: list_h as u16, ..inner };
+    frame.render_widget(List::new(items), list_area);
+}
+
 fn draw_ops_overlay(
     frame: &mut Frame,
     area: Rect,
@@ -1898,7 +2194,7 @@ fn draw_ops_overlay(
     for (i, (_, label, done, total)) in ops.iter().enumerate() {
         let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
         let text = if *total == 0 {
-            format!("{label}")
+            label.clone()
         } else {
             let t = (*total).max(1);
             let d = *done;

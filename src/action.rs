@@ -192,6 +192,27 @@ pub enum Action {
     GitBranchNavUp,
     GitBranchNavDown,
     GitBranchConfirm,
+
+    // Tags
+    GitCreateTag,
+    GitListTags,
+    /// Internal: tag name was entered; now prompt for message.
+    #[strum(to_string = "GitTagNameChosen")]
+    GitTagNameChosen {
+        git_root: PathBuf,
+        name: String,
+    },
+    #[strum(to_string = "GitTagsLoaded")]
+    GitTagsLoaded {
+        tags: Vec<TagInfo>,
+    },
+    GitTagNavUp,
+    GitTagNavDown,
+    /// Check out the commit pointed to by the selected tag.
+    GitTagConfirm,
+    /// Delete the selected tag.
+    GitTagDelete,
+    GitPushFollowTags,
     #[strum(to_string = "GitStatusLoaded")]
     GitStatusLoaded {
         git_root: PathBuf,
@@ -213,6 +234,16 @@ pub enum Action {
         total: u64,
     },
     ProgressDone(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagInfo {
+    pub name: String,
+    pub is_annotated: bool,
+    /// Short OID of the target commit.
+    pub target_id: String,
+    /// Tagger message (annotated tags only).
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
