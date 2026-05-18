@@ -94,3 +94,37 @@ impl From<&Theme> for Palette {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mocha() -> opaline::Theme {
+        opaline::builtins::load_by_name("catppuccin-mocha").expect("builtin theme must exist")
+    }
+
+    #[test]
+    fn palette_from_theme_does_not_panic() {
+        let _p = Palette::from(&mocha());
+    }
+
+    #[test]
+    fn border_active_and_inactive_are_distinct() {
+        let p = Palette::from(&mocha());
+        assert_ne!(p.border_active, p.border_inactive);
+    }
+
+    #[test]
+    fn funcbar_git_and_normal_are_distinct() {
+        let p = Palette::from(&mocha());
+        assert_ne!(p.funcbar_normal, p.funcbar_git);
+    }
+
+    #[test]
+    fn all_builtin_themes_load_without_panic() {
+        for (id, _display) in opaline::builtins::builtin_names() {
+            let theme = opaline::builtins::load_by_name(id).expect("builtin must exist");
+            let _p = Palette::from(&theme);
+        }
+    }
+}

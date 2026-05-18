@@ -20,8 +20,6 @@ A twin-pane TUI file manager written in Rust using Ratatui, inspired by Norton C
 
 ## Installation
 
-Requires the **nightly** Rust toolchain (pinned automatically via `rust-toolchain.toml`).
-
 **From GitHub:**
 ```sh
 cargo install --git https://github.com/tommie-nygren/crabmander
@@ -50,7 +48,20 @@ This writes `~/.local/share/applications/crabmander.desktop` and calls
 (tries `alacritty`, `kitty`, `foot`, `xterm` in that order). Edit the file
 afterward to hardcode your preferred terminal if needed.
 
-## Keyboard reference
+## Modes
+
+Crabmander has four operating modes:
+
+| Mode           | Description                                                         |
+|----------------|---------------------------------------------------------------------|
+| **Normal**     | Twin-pane file manager (default)                                    |
+| **Git**        | Git staging area view (enter with `Ctrl+G` in a git repo)          |
+| **Git Commit** | Multi-line commit message editor (entered from Git mode)            |
+| **Git Branch** | Branch list / switcher (entered from Git mode with `F6` / `b`)     |
+
+---
+
+## Keyboard reference — Normal mode
 
 ### Navigation
 
@@ -85,6 +96,7 @@ marked count and cumulative size.
 | Key         | Action                                                                           |
 |-------------|----------------------------------------------------------------------------------|
 | `F1`        | **Quick CD** — incremental directory navigator (see below)                       |
+| `Shift+F1`  | **Recent dirs** — jump to a previously visited directory                         |
 | `F2`        | **Context menu** — file-type-aware actions (see below)                           |
 | `F3`        | **Nano** — open a file in nano                                                   |
 | `F4`        | **Sizes** — recursively calculate directory sizes; auto-sorts by size descending |
@@ -95,6 +107,8 @@ marked count and cumulative size.
 | `F9`        | **Sort** — cycle sort column: Name → Size → Modified                             |
 | `Shift+F9`  | **Invert sort** — toggle ascending ↑ / descending ↓                              |
 | `F10` / `q` | Quit                                                                             |
+| `F11`       | **Select theme** — live-preview built-in color themes                            |
+| `Ctrl+G`    | **Enter Git mode** (only when active panel is inside a git repo)                 |
 | `Ctrl+Z`    | Suspend to background                                                            |
 
 ### Quick CD (F1)
@@ -119,6 +133,8 @@ real time.
 | `~/pro`          | Subdirectories of `$HOME` containing `pro`        |
 | `/usr/lo`        | Subdirectories of `/usr` containing `lo`          |
 | `/home/` + `Tab` | Drills into `/home/` and lists its subdirectories |
+
+Visited directories are saved and accessible via **Shift+F1** (Recent dirs).
 
 ### Context menu (F2)
 
@@ -156,6 +172,77 @@ The active sort column is indicated by an arrow in the column header
 - Directories whose sizes are not yet known (shown as `···`) always appear at
   the bottom of the directory group until computed.
 
+---
+
+## Keyboard reference — Git mode
+
+Enter Git mode with `Ctrl+G` when the active panel is inside a git repository.
+The display switches to a twin-pane staging view: **Working Tree** on the left,
+**Staging Area** on the right.
+
+File status symbols:
+
+| Symbol | Meaning (working tree) | Meaning (staging area) |
+|--------|------------------------|------------------------|
+| `M`    | Modified               | Modified               |
+| `D`    | Deleted                | Deleted                |
+| `?`    | Untracked              | —                      |
+| `A`    | —                      | Added                  |
+| `R`    | —                      | Renamed                |
+| `C`    | —                      | Copied                 |
+
+### Git mode keys
+
+| Key              | Action                                                              |
+|------------------|---------------------------------------------------------------------|
+| `↑` / `k`        | Move cursor up                                                      |
+| `↓` / `j`        | Move cursor down                                                    |
+| `Tab`            | Switch between Working Tree and Staging Area panes                  |
+| `Space` / `Insert` | Toggle mark on cursor entry and advance cursor                    |
+| `F1` / `a`       | **Stage** — stage marked/cursor files from the Working Tree         |
+| `F2` / `u`       | **Unstage** — unstage marked/cursor files from the Staging Area     |
+| `F3` / `c`       | **Commit** — open multi-line commit message editor                  |
+| `F4` / `p`       | **Push** — push current branch to remote                           |
+| `F5` / `P`       | **Pull** — pull from remote                                         |
+| `F6` / `b`       | **Branches** — open branch list / switcher                          |
+| `F7` / `A`       | **Add all & commit** — stage everything and open commit editor      |
+| `n`              | Create a new branch                                                 |
+| `r`              | Reload git status                                                   |
+| `Esc` / `q`      | Exit Git mode                                                       |
+
+### Commit editor (Git Commit mode)
+
+A full-screen multi-line text editor for writing commit messages.
+
+| Key              | Action                  |
+|------------------|-------------------------|
+| `Ctrl+Enter` / `Alt+Enter` | Submit commit   |
+| `Esc`            | Cancel                  |
+
+### Branch list (Git Branch mode)
+
+| Key     | Action                            |
+|---------|-----------------------------------|
+| `↑` / `k` | Move cursor up                  |
+| `↓` / `j` | Move cursor down                |
+| `Enter` | Check out the selected branch     |
+| `n`     | Create a new branch               |
+| `Esc`   | Exit back to Git mode             |
+
+---
+
+## Git panel indicator
+
+When a panel is inside a git repository, its title bar shows the current branch
+and dirty state:
+
+```
+─ /home/user/project [main] ──────
+─ /home/user/project [main*] ─────   ← asterisk means uncommitted changes
+```
+
+---
+
 ## Configuration
 
 The default configuration is compiled into the binary. To customise keybindings
@@ -181,3 +268,15 @@ CRABMANDER_DATA=~/.local/share/crabmander crabmander
 | `<ctrl-a>`   | Ctrl+A                |
 | `<shift-f9>` | Shift+F9              |
 | `<g><g>`     | Two-key sequence `gg` |
+
+### Themes
+
+Built-in color themes are provided via the [opaline](https://github.com/opaline-rs/opaline)
+crate. Select a theme interactively with `F11`, or set it permanently in your
+config file:
+
+```json5
+{
+  "theme": "catppuccin-mocha"   // default
+}
+```

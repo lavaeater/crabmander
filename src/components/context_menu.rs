@@ -73,7 +73,7 @@ pub struct ArchiveProvider;
 
 impl ContextMenuProvider for ArchiveProvider {
     fn items(&self, ctx: &MenuCtx) -> Vec<MenuItem> {
-        let archives: Vec<std::path::PathBuf> = ctx
+        let archives: Vec<PathBuf> = ctx
             .effective_targets
             .iter()
             .filter(|p| {
@@ -178,7 +178,7 @@ impl ContextMenuProvider for DeviceProvider {
 
 // --- Removable device enumeration via lsblk ---
 
-struct RemovableDev {
+pub struct RemovableDev {
     name: String,
     size: Option<String>,
     fstype: Option<String>,
@@ -217,7 +217,7 @@ fn enumerate_removable_devices() -> Vec<RemovableDev> {
     result
 }
 
-fn collect_removable<'a>(
+pub fn collect_removable<'a>(
     node: &'a serde_json::Value,
     out: &mut Vec<RemovableDev>,
     parent_model: Option<&'a str>,
@@ -254,5 +254,195 @@ fn collect_removable<'a>(
         for child in children {
             collect_removable(child, out, model.as_deref().or(parent_model));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{EntryInfo, Side};
+
+    fn dummy_entry(name: &str, is_dir: bool) -> EntryInfo {
+        EntryInfo {
+            name: name.to_owned(),
+            is_dir,
+            is_symlink: false,
+            size: 0,
+            modified: 0,
+            nlink: 1,
+            owner: "user".to_owned(),
+        }
+    }
+
+    fn ctx(name: &str, is_dir: bool) -> MenuCtx {
+        let entry = dummy_entry(name, is_dir);
+        let entry_path = PathBuf::from("/tmp").join(name);
+        MenuCtx {
+            entry,
+            entry_path: entry_path.clone(),
+            panel_dir: PathBuf::from("/tmp"),
+            other_dir: PathBuf::from("/other"),
+            active_side: Side::Left,
+            effective_targets: vec![entry_path],
+        }
+    }
+
+    #[test]
+    fn os_open_provider_always_returns_two_items() {
+        let items = OsOpenProvider.items(&ctx("file.txt", false));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn os_open_provider_on_dir_uses_entry_path_for_vscode() {
+        let items = OsOpenProvider.items(&ctx("docs", true));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn archive_provider_returns_empty_for_non_archive() {
+        let items = ArchiveProvider.items(&ctx("readme.txt", false));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn archive_provider_returns_two_items_for_zip() {
+        let mut c = ctx("archive.zip", false);
+        c.effective_targets = vec![PathBuf::from("/tmp/archive.zip")];
+        let items = ArchiveProvider.items(&c);
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn archive_provider_uses_count_label_for_multiple_archives() {
+        let mut c = ctx("a.zip", false);
+        c.effective_targets = vec![
+            PathBuf::from("/tmp/a.zip"),
+            PathBuf::from("/tmp/b.tar.gz"),
+        ];
+        let items = ArchiveProvider.items(&c);
+        assert_eq!(items.len(), 2);
+        assert!(items[0].label.contains("2 archives"));
+    }
+
+    #[test]
+    fn archive_provider_returns_empty_for_directory() {
+        let items = ArchiveProvider.items(&ctx("docs", true));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn execute_provider_returns_empty_for_directory() {
+        let items = ExecuteProvider.items(&ctx("bin", true));
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn chown_provider_always_returns_one_item() {
+        let items = ChownProvider.items(&ctx("file.txt", false));
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn chown_provider_item_includes_current_owner() {
+        let mut c = ctx("file.txt", false);
+        c.entry.owner = "alice".to_owned();
+        let items = ChownProvider.items(&c);
+        assert!(items[0].label.contains("alice"));
+    }
+
+    #[test]
+    fn removable_dev_human_label_all_fields() {
+        let dev = RemovableDev {
+            name: "sdb1".into(),
+            size: Some("16G".into()),
+            fstype: Some("vfat".into()),
+            label: Some("USB".into()),
+            model: Some("SanDisk".into()),
+            mountpoint: None,
+        };
+        let label = dev.human_label();
+        assert!(label.contains("16G"));
+        assert!(label.contains("vfat"));
+        assert!(label.contains("USB"));
+        assert!(label.contains("SanDisk"));
+    }
+
+    #[test]
+    fn removable_dev_human_label_empty_falls_back_to_name() {
+        let dev = RemovableDev {
+            name: "sdb".into(),
+            size: None,
+            fstype: None,
+            label: None,
+            model: None,
+            mountpoint: None,
+        };
+        assert_eq!(dev.human_label(), "sdb");
+    }
+
+    #[test]
+    fn collect_removable_hotplug_partition_is_included() {
+        let node = serde_json::json!({
+            "name": "sdb1",
+            "size": "8G",
+            "fstype": "vfat",
+            "label": "USB",
+            "mountpoint": "/mnt/usb",
+            "model": "",
+            "hotplug": true,
+            "type": "part"
+        });
+        let mut out = Vec::new();
+        collect_removable(&node, &mut out, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "sdb1");
+        assert_eq!(out[0].mountpoint.as_deref(), Some("/mnt/usb"));
+    }
+
+    #[test]
+    fn collect_removable_non_hotplug_is_excluded() {
+        let node = serde_json::json!({
+            "name": "sda1",
+            "size": "500G",
+            "fstype": "ext4",
+            "label": null,
+            "mountpoint": "/",
+            "model": "",
+            "hotplug": false,
+            "type": "part"
+        });
+        let mut out = Vec::new();
+        collect_removable(&node, &mut out, None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn collect_removable_recurses_into_children() {
+        let node = serde_json::json!({
+            "name": "sdb",
+            "size": "16G",
+            "fstype": null,
+            "label": null,
+            "mountpoint": null,
+            "model": "SanDisk",
+            "hotplug": true,
+            "type": "disk",
+            "children": [{
+                "name": "sdb1",
+                "size": "16G",
+                "fstype": "vfat",
+                "label": "DATA",
+                "mountpoint": null,
+                "model": null,
+                "hotplug": true,
+                "type": "part"
+            }]
+        });
+        let mut out = Vec::new();
+        collect_removable(&node, &mut out, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "sdb1");
+        assert_eq!(out[0].model.as_deref(), Some("SanDisk"));
     }
 }

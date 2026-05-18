@@ -471,3 +471,152 @@ fn index_status_display(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{GitEntry, GitIndexStatus, GitWorktreeStatus};
+
+    fn wt_entry(path: &str) -> GitEntry {
+        GitEntry { path: path.to_owned(), index: None, worktree: Some(GitWorktreeStatus::Modified) }
+    }
+
+    fn idx_entry(path: &str) -> GitEntry {
+        GitEntry { path: path.to_owned(), index: Some(GitIndexStatus::Added), worktree: None }
+    }
+
+    fn both_entry(path: &str) -> GitEntry {
+        GitEntry {
+            path: path.to_owned(),
+            index: Some(GitIndexStatus::Modified),
+            worktree: Some(GitWorktreeStatus::Modified),
+        }
+    }
+
+    fn view_with(entries: Vec<GitEntry>) -> GitView {
+        let mut v = GitView::new(PathBuf::from("/repo"), "main".into());
+        v.on_status_loaded("main".into(), entries);
+        v
+    }
+
+    #[test]
+    fn new_view_starts_on_worktree_pane() {
+        let v = GitView::new(PathBuf::from("/repo"), "main".into());
+        assert_eq!(v.active_pane, GitPane::Worktree);
+    }
+
+    #[test]
+    fn nav_up_does_not_underflow() {
+        let mut v = view_with(vec![wt_entry("a.rs")]);
+        v.nav_up();
+        assert_eq!(v.left_cursor, 0);
+    }
+
+    #[test]
+    fn nav_down_clamps_to_last_entry() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
+        v.nav_down();
+        v.nav_down();
+        v.nav_down();
+        assert_eq!(v.left_cursor, 1);
+    }
+
+    #[test]
+    fn nav_down_empty_list_does_not_panic() {
+        let mut v = view_with(vec![]);
+        v.nav_down();
+        assert_eq!(v.left_cursor, 0);
+    }
+
+    #[test]
+    fn switch_pane_toggles_between_worktree_and_staging() {
+        let mut v = GitView::new(PathBuf::from("/repo"), "main".into());
+        assert_eq!(v.active_pane, GitPane::Worktree);
+        v.switch_pane();
+        assert_eq!(v.active_pane, GitPane::Staging);
+        v.switch_pane();
+        assert_eq!(v.active_pane, GitPane::Worktree);
+    }
+
+    #[test]
+    fn toggle_mark_marks_worktree_entry_and_advances_cursor() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
+        v.toggle_mark();
+        assert!(v.left_marked.contains("a.rs"));
+        assert_eq!(v.left_cursor, 1);
+    }
+
+    #[test]
+    fn toggle_mark_unmarks_already_marked_entry() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
+        v.toggle_mark();
+        v.left_cursor = 0;
+        v.toggle_mark();
+        assert!(!v.left_marked.contains("a.rs"));
+    }
+
+    #[test]
+    fn stage_targets_returns_cursor_when_no_marks() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
+        v.left_cursor = 1;
+        assert_eq!(v.stage_targets(), vec!["b.rs".to_owned()]);
+    }
+
+    #[test]
+    fn stage_targets_returns_marks_when_marks_exist() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
+        v.left_marked.insert("a.rs".into());
+        let targets = v.stage_targets();
+        assert_eq!(targets, vec!["a.rs".to_owned()]);
+    }
+
+    #[test]
+    fn unstage_targets_returns_cursor_staging_entry() {
+        let mut v = view_with(vec![idx_entry("a.rs"), idx_entry("b.rs")]);
+        v.switch_pane();
+        v.right_cursor = 1;
+        assert_eq!(v.unstage_targets(), vec!["b.rs".to_owned()]);
+    }
+
+    #[test]
+    fn has_staged_false_when_no_index_entries() {
+        let v = view_with(vec![wt_entry("a.rs")]);
+        assert!(!v.has_staged());
+    }
+
+    #[test]
+    fn has_staged_true_when_index_entries_present() {
+        let v = view_with(vec![idx_entry("a.rs")]);
+        assert!(v.has_staged());
+    }
+
+    #[test]
+    fn both_entry_appears_in_both_panes() {
+        let v = view_with(vec![both_entry("a.rs")]);
+        assert_eq!(v.worktree_entries().len(), 1);
+        assert_eq!(v.staging_entries().len(), 1);
+    }
+
+    #[test]
+    fn on_status_loaded_updates_branch_name() {
+        let mut v = GitView::new(PathBuf::from("/repo"), "main".into());
+        v.on_status_loaded("feature/foo".into(), vec![]);
+        assert_eq!(v.branch, "feature/foo");
+    }
+
+    #[test]
+    fn on_status_loaded_clamps_cursor_to_new_list_length() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs"), wt_entry("c.rs")]);
+        v.left_cursor = 2;
+        v.on_status_loaded("main".into(), vec![wt_entry("a.rs")]);
+        assert_eq!(v.left_cursor, 0);
+    }
+
+    #[test]
+    fn on_status_loaded_drops_stale_marks() {
+        let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
+        v.left_marked.insert("b.rs".into());
+        v.on_status_loaded("main".into(), vec![wt_entry("a.rs")]);
+        assert!(!v.left_marked.contains("b.rs"));
+    }
+}
+
