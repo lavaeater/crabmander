@@ -41,6 +41,7 @@ pub struct App {
     right: Panel,
     active: Side,
     dialog: Option<DialogState>,
+    dialog_prior_mode: Mode,
     mode: Mode,
     last_error: Option<String>,
     /// Session-wide cache of recursively-computed directory sizes.
@@ -94,6 +95,7 @@ impl App {
             right,
             active: Side::Left,
             dialog: None,
+            dialog_prior_mode: Mode::Normal,
             mode: Mode::Normal,
             last_error: None,
             dir_size_cache: std::collections::HashMap::new(),
@@ -879,6 +881,7 @@ impl App {
     }
 
     fn open_dialog(&mut self, state: DialogState) {
+        self.dialog_prior_mode = self.mode;
         self.dialog = Some(state);
         self.mode = Mode::Dialog;
     }
@@ -904,7 +907,7 @@ impl App {
             DialogState::ContextMenu {
                 items, selected, ..
             } => {
-                self.mode = Mode::Normal;
+                self.mode = self.dialog_prior_mode;
                 if let Some(item) = items.into_iter().nth(selected) {
                     self.execute_menu_action(item.action);
                 }
@@ -930,7 +933,7 @@ impl App {
 
     fn dialog_cancel(&mut self) {
         self.dialog = None;
-        self.mode = Mode::Normal;
+        self.mode = self.dialog_prior_mode;
     }
 
     fn execute_menu_action(&mut self, action: MenuAction) {
