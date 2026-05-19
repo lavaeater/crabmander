@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::{
     prelude::*,
@@ -7,13 +7,15 @@ use ratatui::{
 
 use crate::palette::Palette;
 
+// --- Static cargo commands ---
+
 struct CargoCommand {
     label: &'static str,
     subcommand: &'static str,
     extra_args: &'static str,
 }
 
-const COMMANDS: &[CargoCommand] = &[
+const CARGO_COMMANDS: &[CargoCommand] = &[
     CargoCommand { label: "build", subcommand: "build", extra_args: "" },
     CargoCommand { label: "build --release", subcommand: "build", extra_args: "--release" },
     CargoCommand { label: "check", subcommand: "check", extra_args: "" },
@@ -33,14 +35,70 @@ const COMMANDS: &[CargoCommand] = &[
     CargoCommand { label: "update", subcommand: "update", extra_args: "" },
 ];
 
+// --- Dynamic command list entry ---
+
+/// A selectable entry in the project command picker.
+pub enum Entry {
+    /// A `bacon <job>` invocation (or bare `bacon` when job is empty).
+    Bacon { job: String },
+    /// A `cargo <subcommand> [extra_args]` invocation.
+    Cargo { idx: usize },
+    /// Visual separator — not selectable.
+    Separator,
+}
+
+impl Entry {
+    fn is_selectable(&self) -> bool {
+        !matches!(self, Entry::Separator)
+    }
+}
+
+// --- CargoView ---
+
 pub struct CargoView {
     pub cargo_root: PathBuf,
+    entries: Vec<Entry>,
+    /// Index into `entries` pointing at the highlighted item (always selectable).
     pub cursor: usize,
 }
 
 impl CargoView {
-    pub fn new(cargo_root: PathBuf) -> Self {
-        Self { cargo_root, cursor: 0 }
+    pub fn new(cargo_root: PathBuf, bacon_jobs: Vec<String>) -> Self {
+        let mut entries: Vec<Entry> = Vec::new();
+
+        if !bacon_jobs.is_empty() {
+            // Default bacon invocation (picks up the default_job from bacon.toml).
+            entries.push(Entry::Bacon { job: String::new() });
+            for job in bacon_jobs {
+                entries.push(Entry::Bacon { job });
+            }
+            entries.push(Entry::Separator);
+        }
+
+        for idx in 0..CARGO_COMMANDS.len() {
+            entries.push(Entry::Cargo { idx });
+        }
+
+        Self { cargo_root, entries, cursor: 0 }
+    }
+
+    fn selectable_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.is_selectable()).count()
+    }
+
+    /// Map a logical cursor position (0-based among selectable entries) to the
+    /// real index in `self.entries`.
+    fn real_index(&self) -> usize {
+        let mut sel = 0usize;
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.is_selectable() {
+                if sel == self.cursor {
+                    return i;
+                }
+                sel += 1;
+            }
+        }
+        0
     }
 
     pub fn nav_up(&mut self) {
@@ -48,23 +106,32 @@ impl CargoView {
     }
 
     pub fn nav_down(&mut self) {
-        self.cursor = (self.cursor + 1).min(COMMANDS.len().saturating_sub(1));
+        self.cursor = (self.cursor + 1).min(self.selectable_count().saturating_sub(1));
     }
 
-    /// Returns `(subcommand, extra_args)` for the currently selected command.
-    pub fn selected_args(&self) -> (&'static str, &'static str) {
-        let cmd = &COMMANDS[self.cursor];
-        (cmd.subcommand, cmd.extra_args)
+    /// Returns the shell command string for the currently selected entry.
+    /// Caller is responsible for `cd`-ing to `cargo_root` first.
+    pub fn selected_shell_cmd(&self) -> String {
+        match &self.entries[self.real_index()] {
+            Entry::Bacon { job } if job.is_empty() => "bacon".to_string(),
+            Entry::Bacon { job } => format!("bacon {}", job),
+            Entry::Cargo { idx } => {
+                let c = &CARGO_COMMANDS[*idx];
+                if c.extra_args.is_empty() {
+                    format!("cargo {}", c.subcommand)
+                } else {
+                    format!("cargo {} {}", c.subcommand, c.extra_args)
+                }
+            }
+            Entry::Separator => unreachable!("separator is not selectable"),
+        }
     }
 
     pub fn draw(&self, frame: &mut Frame, area: Rect, palette: &Palette) {
         let popup = centered_rect(50, 80, area);
         frame.render_widget(Clear, popup);
 
-        let title = format!(
-            " Cargo: {} ",
-            self.cargo_root.display()
-        );
+        let title = format!(" Project: {} ", self.cargo_root.display());
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(palette.cargo_border)
@@ -73,21 +140,55 @@ impl CargoView {
         frame.render_widget(block, popup);
 
         let list_h = inner.height.saturating_sub(1) as usize;
-        let offset = if self.cursor < list_h { 0 } else { self.cursor + 1 - list_h };
 
-        let items: Vec<ListItem> = COMMANDS
+        // Compute display offset so the highlighted row stays visible.
+        let real_cur = self.real_index();
+        let offset = if real_cur < list_h { 0 } else { real_cur + 1 - list_h };
+
+        let mut sel_idx = 0usize; // running selectable counter for cursor matching
+        // pre-count selectable entries before offset so we know sel_idx at offset
+        for e in self.entries.iter().take(offset) {
+            if e.is_selectable() { sel_idx += 1; }
+        }
+
+        let items: Vec<ListItem> = self
+            .entries
             .iter()
             .enumerate()
             .skip(offset)
             .take(list_h)
-            .map(|(i, cmd)| {
-                let label = format!("  cargo {} ", cmd.label);
-                let style = if i == self.cursor {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(label).style(style)
+            .map(|(_, entry)| match entry {
+                Entry::Separator => {
+                    ListItem::new("  ──────────────────────────────────────")
+                        .style(Style::default().add_modifier(Modifier::DIM))
+                }
+                Entry::Bacon { job } => {
+                    let label = if job.is_empty() {
+                        "  bacon  (default job)".to_string()
+                    } else {
+                        format!("  bacon {}", job)
+                    };
+                    let is_cur = sel_idx == self.cursor;
+                    sel_idx += 1;
+                    let style = if is_cur {
+                        palette.cargo_bacon_selected
+                    } else {
+                        palette.cargo_bacon
+                    };
+                    ListItem::new(label).style(style)
+                }
+                Entry::Cargo { idx } => {
+                    let cmd = &CARGO_COMMANDS[*idx];
+                    let label = format!("  cargo {}", cmd.label);
+                    let is_cur = sel_idx == self.cursor;
+                    sel_idx += 1;
+                    let style = if is_cur {
+                        Style::default().add_modifier(Modifier::REVERSED)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(label).style(style)
+                }
             })
             .collect();
 
@@ -107,6 +208,32 @@ impl CargoView {
         frame.render_widget(List::new(items), list_area);
     }
 }
+
+// --- Bacon detection ---
+
+/// Returns the job names defined in `bacon.toml`, or an empty vec if none / not found.
+/// Parses `[jobs.name]` section headers without pulling in a TOML crate.
+pub fn read_bacon_jobs(cargo_root: &Path) -> Vec<String> {
+    let path = cargo_root.join("bacon.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut jobs = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Match `[jobs.jobname]` but not sub-tables like `[jobs.foo.bar]`
+        if let Some(inner) = trimmed.strip_prefix("[jobs.").and_then(|s| s.strip_suffix(']'))
+            && !inner.contains('.')
+            && !inner.is_empty()
+        {
+            jobs.push(inner.to_string());
+        }
+    }
+    jobs
+}
+
+// --- Layout ---
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let w = (area.width * percent_x / 100).max(40).min(area.width);

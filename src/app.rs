@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use crate::{
     action::{Action, BranchInfo, Side, TagInfo},
     components::{
-        cargo_view::CargoView,
+        cargo_view::{read_bacon_jobs, CargoView},
         context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
         dialog::{self, DialogState, MenuAction, MenuItem},
         func_bar::{self, FuncBarMode},
@@ -1269,7 +1269,8 @@ impl App {
 
     fn enter_cargo_mode(&mut self) {
         let Some(root) = self.active_panel().cargo_root.clone() else { return };
-        self.cargo_view = Some(CargoView::new(root));
+        let bacon_jobs = read_bacon_jobs(&root);
+        self.cargo_view = Some(CargoView::new(root, bacon_jobs));
         self.mode = Mode::Cargo;
         self.last_error = None;
     }
@@ -1281,17 +1282,12 @@ impl App {
 
     fn do_cargo_run_selected(&mut self) {
         let Some(cv) = &self.cargo_view else { return };
-        let (subcommand, extra_args) = cv.selected_args();
+        let shell_cmd = cv.selected_shell_cmd();
         let cargo_root = cv.cargo_root.clone();
 
         let root_str = cargo_root.to_string_lossy().into_owned();
         let escaped_root = root_str.replace('\'', "'\\''");
-        let cargo_args = if extra_args.is_empty() {
-            subcommand.to_string()
-        } else {
-            format!("{} {}", subcommand, extra_args)
-        };
-        let sh_cmd = format!("cd '{}' && cargo {}", escaped_root, cargo_args);
+        let sh_cmd = format!("cd '{}' && {}", escaped_root, shell_cmd);
 
         self.mode = Mode::Normal;
         self.cargo_view = None;
