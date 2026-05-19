@@ -1,3 +1,4 @@
+pub mod cargo_view;
 pub mod context_menu;
 pub mod dialog;
 pub mod func_bar;

@@ -25,6 +25,7 @@ pub struct Palette {
     // Func bar key chips
     pub funcbar_normal: Style,
     pub funcbar_git: Style,
+    pub funcbar_cargo: Style,
 
     // Dialog borders
     pub dlg_confirm: Style,
@@ -46,6 +47,9 @@ pub struct Palette {
 
     // Git status bar
     pub git_status_bar: Style,
+
+    // Cargo mode
+    pub cargo_border: Style,
 }
 
 impl From<&Theme> for Palette {
@@ -72,6 +76,7 @@ impl From<&Theme> for Palette {
 
             funcbar_normal: Style::default().fg(c("bg.base")).bg(c("accent.secondary")),
             funcbar_git: Style::default().fg(c("bg.base")).bg(c("success")),
+            funcbar_cargo: Style::default().fg(c("bg.base")).bg(c("warning")),
 
             dlg_confirm: Style::default().fg(c("warning")),
             dlg_input: Style::default().fg(c("accent.secondary")),
@@ -90,6 +95,10 @@ impl From<&Theme> for Palette {
 
             git_status_bar: Style::default()
                 .fg(c("success"))
+                .add_modifier(Modifier::BOLD),
+
+            cargo_border: Style::default()
+                .fg(c("warning"))
                 .add_modifier(Modifier::BOLD),
         }
     }

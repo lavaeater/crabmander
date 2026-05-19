@@ -170,6 +170,13 @@ pub enum Action {
     SelectTheme,  // F11
     RecentDirs,   // Shift-F1
 
+    // Cargo mode
+    EnterCargoMode,
+    ExitCargoMode,
+    CargoNavUp,
+    CargoNavDown,
+    CargoRunSelected,
+
     // Git mode
     EnterGitMode,
     ExitGitMode,

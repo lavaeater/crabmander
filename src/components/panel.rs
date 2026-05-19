@@ -49,6 +49,8 @@ pub struct Panel {
     /// Current branch name; `None` when not inside a git repository.
     pub git_branch: Option<String>,
     pub git_dirty: bool,
+    /// Root of the nearest Cargo workspace/package; `None` when not in a Rust project.
+    pub cargo_root: Option<PathBuf>,
     action_tx: UnboundedSender<Action>,
 }
 
@@ -72,6 +74,7 @@ impl Panel {
             sort_order: SortOrder::Asc,
             git_branch: None,
             git_dirty: false,
+            cargo_root: None,
             action_tx,
         }
     }
@@ -110,6 +113,7 @@ impl Panel {
             self.sizes_pending = 0;
             self.git_branch = None;
             self.git_dirty = false;
+            self.cargo_root = find_cargo_root(&self.path);
         } else {
             // Prune marks for files that no longer exist after a reload.
             let existing: HashSet<&str> = self.entries.iter().map(|e| e.name.as_str()).collect();
@@ -933,6 +937,18 @@ pub(crate) fn condense_path(path: &str, max_chars: usize) -> String {
         }
     }
     format!("{}{}", if has_leading { "/" } else { "" }, parts.join("/"))
+}
+
+// --- Cargo detection ---
+
+fn find_cargo_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        if current.join("Cargo.toml").exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
 }
 
 // --- Git info ---

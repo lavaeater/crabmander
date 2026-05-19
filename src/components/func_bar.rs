@@ -33,9 +33,25 @@ const GIT_KEYS: &[(&str, &str)] = &[
     ("Esc", "Normal"),
 ];
 
-pub fn draw(frame: &mut Frame, area: Rect, git_mode: bool, palette: &Palette) {
-    let keys = if git_mode { GIT_KEYS } else { NORMAL_KEYS };
-    let key_style = if git_mode { palette.funcbar_git } else { palette.funcbar_normal };
+const CARGO_KEYS: &[(&str, &str)] = &[
+    ("↑↓", "Navigate"),
+    ("j/k", "Navigate"),
+    ("Enter", "Run"),
+    ("^B/Esc", "Exit"),
+];
+
+pub enum FuncBarMode {
+    Normal,
+    Git,
+    Cargo,
+}
+
+pub fn draw(frame: &mut Frame, area: Rect, mode: FuncBarMode, palette: &Palette) {
+    let (keys, key_style) = match mode {
+        FuncBarMode::Normal => (NORMAL_KEYS, palette.funcbar_normal),
+        FuncBarMode::Git => (GIT_KEYS, palette.funcbar_git),
+        FuncBarMode::Cargo => (CARGO_KEYS, palette.funcbar_cargo),
+    };
     let mut spans = Vec::new();
     for (key, label) in keys {
         spans.push(Span::styled(*key, key_style));

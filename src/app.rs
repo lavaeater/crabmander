@@ -8,9 +8,10 @@ use tracing::{debug, info};
 use crate::{
     action::{Action, BranchInfo, Side, TagInfo},
     components::{
+        cargo_view::CargoView,
         context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
         dialog::{self, DialogState, MenuAction, MenuItem},
-        func_bar,
+        func_bar::{self, FuncBarMode},
         git_view::GitView,
         panel::{Panel, copy_recursive, delete_recursive, extract_archive_sync, file_name_of},
     },
@@ -30,6 +31,7 @@ pub enum Mode {
     GitCommit,
     GitBranch,
     GitTag,
+    Cargo,
 }
 
 pub struct App {
@@ -51,6 +53,7 @@ pub struct App {
     /// Tuple: (cmd, args, sides_to_reload_after).
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
     git_view: Option<GitView>,
+    cargo_view: Option<CargoView>,
     commit_textarea: Option<TextArea<'static>>,
     branch_list: Vec<BranchInfo>,
     branch_cursor: usize,
@@ -101,6 +104,7 @@ impl App {
             dir_size_cache: std::collections::HashMap::new(),
             pending_command: None::<(String, Vec<String>, Vec<Side>)>,
             git_view: None,
+            cargo_view: None,
             commit_textarea: None,
             branch_list: Vec::new(),
             branch_cursor: 0,
@@ -290,6 +294,25 @@ impl App {
                 KeyCode::Char('t') => tx.send(Action::GitCreateTag)?,
                 KeyCode::Char('T') => tx.send(Action::GitListTags)?,
                 _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.mode == Mode::Cargo {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitCargoMode)?,
+                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::CargoNavUp)?,
+                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::CargoNavDown)?,
+                KeyCode::Enter => tx.send(Action::CargoRunSelected)?,
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        // Ctrl+B enters cargo mode when the active panel is inside a Rust project.
+        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('b') {
+            if self.active_panel().cargo_root.is_some() {
+                tx.send(Action::EnterCargoMode)?;
             }
             return Ok(());
         }
@@ -525,6 +548,17 @@ impl App {
                 Action::SelectTheme => self.open_theme_selector(),
                 Action::RecentDirs => self.open_recent_dirs_menu(),
 
+                // Cargo mode
+                Action::EnterCargoMode => self.enter_cargo_mode(),
+                Action::ExitCargoMode => self.exit_cargo_mode(),
+                Action::CargoNavUp => {
+                    if let Some(cv) = &mut self.cargo_view { cv.nav_up(); }
+                }
+                Action::CargoNavDown => {
+                    if let Some(cv) = &mut self.cargo_view { cv.nav_down(); }
+                }
+                Action::CargoRunSelected => self.do_cargo_run_selected(),
+
                 // Git mode
                 Action::EnterGitMode => self.enter_git_mode(),
                 Action::ExitGitMode => self.exit_git_mode(),
@@ -628,7 +662,9 @@ impl App {
         let dialog = &self.dialog;
         let last_error = &self.last_error;
         let git_view = &mut self.git_view;
+        let cargo_view = &self.cargo_view;
         let git_mode = matches!(self.mode, Mode::Git | Mode::GitCommit | Mode::GitBranch | Mode::GitTag);
+        let cargo_mode = self.mode == Mode::Cargo;
         let commit_textarea = &mut self.commit_textarea;
         let branch_list = &self.branch_list;
         let branch_cursor = self.branch_cursor;
@@ -672,9 +708,20 @@ impl App {
 
                 let active_panel = if active == Side::Left { &*left } else { &*right };
                 draw_status_bar(frame, status_area, active_panel, last_error.as_deref(), palette);
+
+                if cargo_mode && let Some(cv) = cargo_view {
+                    cv.draw(frame, panels_area, palette);
+                }
             }
 
-            func_bar::draw(frame, func_area, git_mode, palette);
+            let fb_mode = if git_mode {
+                FuncBarMode::Git
+            } else if cargo_mode {
+                FuncBarMode::Cargo
+            } else {
+                FuncBarMode::Normal
+            };
+            func_bar::draw(frame, func_area, fb_mode, palette);
 
             if let Some(d) = dialog {
                 dialog::draw(frame, d, area, palette);
@@ -1218,6 +1265,37 @@ impl App {
         // Reload both panels in case git ops changed the filesystem.
         self.left.reload();
         self.right.reload();
+    }
+
+    fn enter_cargo_mode(&mut self) {
+        let Some(root) = self.active_panel().cargo_root.clone() else { return };
+        self.cargo_view = Some(CargoView::new(root));
+        self.mode = Mode::Cargo;
+        self.last_error = None;
+    }
+
+    fn exit_cargo_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.cargo_view = None;
+    }
+
+    fn do_cargo_run_selected(&mut self) {
+        let Some(cv) = &self.cargo_view else { return };
+        let (subcommand, extra_args) = cv.selected_args();
+        let cargo_root = cv.cargo_root.clone();
+
+        let root_str = cargo_root.to_string_lossy().into_owned();
+        let escaped_root = root_str.replace('\'', "'\\''");
+        let cargo_args = if extra_args.is_empty() {
+            subcommand.to_string()
+        } else {
+            format!("{} {}", subcommand, extra_args)
+        };
+        let sh_cmd = format!("cd '{}' && cargo {}", escaped_root, cargo_args);
+
+        self.mode = Mode::Normal;
+        self.cargo_view = None;
+        self.pending_command = Some(("sh".into(), vec!["-c".into(), sh_cmd], vec![]));
     }
 
     fn do_git_stage(&mut self) {
@@ -2197,7 +2275,7 @@ fn draw_ops_overlay(
     for (i, (_, label, done, total)) in ops.iter().enumerate() {
         let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
         let text = if *total == 0 {
-            label.clone()
+            label.to_string()
         } else {
             let t = (*total).max(1);
             let d = *done;
