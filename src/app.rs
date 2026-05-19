@@ -8,7 +8,7 @@ use tracing::{debug, info};
 use crate::{
     action::{Action, BranchInfo, Side, TagInfo},
     components::{
-        cargo_view::{read_bacon_jobs, CargoView},
+        cargo_view::CargoView,
         context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
         dialog::{self, DialogState, MenuAction, MenuItem},
         func_bar::{self, FuncBarMode},
@@ -1269,8 +1269,7 @@ impl App {
 
     fn enter_cargo_mode(&mut self) {
         let Some(root) = self.active_panel().cargo_root.clone() else { return };
-        let bacon_jobs = read_bacon_jobs(&root);
-        self.cargo_view = Some(CargoView::new(root, bacon_jobs));
+        self.cargo_view = Some(CargoView::new(root));
         self.mode = Mode::Cargo;
         self.last_error = None;
     }

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ratatui::{
     prelude::*,
@@ -39,8 +39,6 @@ const CARGO_COMMANDS: &[CargoCommand] = &[
 
 /// A selectable entry in the project command picker.
 pub enum Entry {
-    /// A `bacon <job>` invocation (or bare `bacon` when job is empty).
-    Bacon { job: String },
     /// A `cargo <subcommand> [extra_args]` invocation.
     Cargo { idx: usize },
     /// Visual separator — not selectable.
@@ -63,22 +61,8 @@ pub struct CargoView {
 }
 
 impl CargoView {
-    pub fn new(cargo_root: PathBuf, bacon_jobs: Vec<String>) -> Self {
-        let mut entries: Vec<Entry> = Vec::new();
-
-        if !bacon_jobs.is_empty() {
-            // Default bacon invocation (picks up the default_job from bacon.toml).
-            entries.push(Entry::Bacon { job: String::new() });
-            for job in bacon_jobs {
-                entries.push(Entry::Bacon { job });
-            }
-            entries.push(Entry::Separator);
-        }
-
-        for idx in 0..CARGO_COMMANDS.len() {
-            entries.push(Entry::Cargo { idx });
-        }
-
+    pub fn new(cargo_root: PathBuf) -> Self {
+        let entries: Vec<Entry> = (0..CARGO_COMMANDS.len()).map(|idx| Entry::Cargo { idx }).collect();
         Self { cargo_root, entries, cursor: 0 }
     }
 
@@ -113,8 +97,6 @@ impl CargoView {
     /// Caller is responsible for `cd`-ing to `cargo_root` first.
     pub fn selected_shell_cmd(&self) -> String {
         match &self.entries[self.real_index()] {
-            Entry::Bacon { job } if job.is_empty() => "bacon".to_string(),
-            Entry::Bacon { job } => format!("bacon {}", job),
             Entry::Cargo { idx } => {
                 let c = &CARGO_COMMANDS[*idx];
                 if c.extra_args.is_empty() {
@@ -162,21 +144,6 @@ impl CargoView {
                     ListItem::new("  ──────────────────────────────────────")
                         .style(Style::default().add_modifier(Modifier::DIM))
                 }
-                Entry::Bacon { job } => {
-                    let label = if job.is_empty() {
-                        "  bacon  (default job)".to_string()
-                    } else {
-                        format!("  bacon {}", job)
-                    };
-                    let is_cur = sel_idx == self.cursor;
-                    sel_idx += 1;
-                    let style = if is_cur {
-                        palette.cargo_bacon_selected
-                    } else {
-                        palette.cargo_bacon
-                    };
-                    ListItem::new(label).style(style)
-                }
                 Entry::Cargo { idx } => {
                     let cmd = &CARGO_COMMANDS[*idx];
                     let label = format!("  cargo {}", cmd.label);
@@ -207,30 +174,6 @@ impl CargoView {
         let list_area = Rect { height: list_h as u16, ..inner };
         frame.render_widget(List::new(items), list_area);
     }
-}
-
-// --- Bacon detection ---
-
-/// Returns the job names defined in `bacon.toml`, or an empty vec if none / not found.
-/// Parses `[jobs.name]` section headers without pulling in a TOML crate.
-pub fn read_bacon_jobs(cargo_root: &Path) -> Vec<String> {
-    let path = cargo_root.join("bacon.toml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let mut jobs = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim();
-        // Match `[jobs.jobname]` but not sub-tables like `[jobs.foo.bar]`
-        if let Some(inner) = trimmed.strip_prefix("[jobs.").and_then(|s| s.strip_suffix(']'))
-            && !inner.contains('.')
-            && !inner.is_empty()
-        {
-            jobs.push(inner.to_string());
-        }
-    }
-    jobs
 }
 
 // --- Layout ---

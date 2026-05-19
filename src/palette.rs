@@ -48,10 +48,8 @@ pub struct Palette {
     // Git status bar
     pub git_status_bar: Style,
 
-    // Cargo / bacon mode
+    // Cargo mode
     pub cargo_border: Style,
-    pub cargo_bacon: Style,
-    pub cargo_bacon_selected: Style,
 }
 
 impl From<&Theme> for Palette {
@@ -102,12 +100,6 @@ impl From<&Theme> for Palette {
             cargo_border: Style::default()
                 .fg(c("warning"))
                 .add_modifier(Modifier::BOLD),
-            cargo_bacon: Style::default()
-                .fg(c("accent.primary"))
-                .add_modifier(Modifier::BOLD),
-            cargo_bacon_selected: Style::default()
-                .fg(c("accent.primary"))
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED),
         }
     }
 }
