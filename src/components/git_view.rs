@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::{HashMap, HashSet}, path::PathBuf};
 
 use ratatui::{
     prelude::*,
@@ -7,7 +7,7 @@ use ratatui::{
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
 
-use crate::action::{Action, BranchInfo, GitEntry, GitIndexStatus, GitWorktreeStatus};
+use crate::action::{Action, BranchInfo, GitEntry, GitIndexStatus, GitWorktreeStatus, SubmoduleInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitPane {
@@ -26,6 +26,7 @@ pub struct GitView {
     right_offset: usize,
     left_marked: HashSet<String>,
     right_marked: HashSet<String>,
+    pub submodule_statuses: HashMap<String, SubmoduleInfo>,
 }
 
 impl GitView {
@@ -41,11 +42,12 @@ impl GitView {
             right_offset: 0,
             left_marked: HashSet::new(),
             right_marked: HashSet::new(),
+            submodule_statuses: HashMap::new(),
         }
     }
 
-    pub fn on_status_loaded(&mut self, branch: String, entries: Vec<GitEntry>) {
-        info!("on_status_loaded: {} total entries", entries.len());
+    pub fn on_status_loaded(&mut self, branch: String, entries: Vec<GitEntry>, submodules: Vec<SubmoduleInfo>) {
+        info!("on_status_loaded: {} total entries, {} submodules", entries.len(), submodules.len());
         self.branch = branch;
         let wt_len = entries.iter().filter(|e| e.worktree.is_some()).count();
         let st_len = entries.iter().filter(|e| e.index.is_some()).count();
@@ -57,6 +59,15 @@ impl GitView {
         let st: HashSet<_> = self.staging_entries().into_iter().map(|e| e.path.clone()).collect();
         self.left_marked.retain(|p| wt.contains(p));
         self.right_marked.retain(|p| st.contains(p));
+        self.submodule_statuses = submodules.into_iter().map(|s| (s.path.clone(), s)).collect();
+    }
+
+    pub fn dirty_submodules(&self) -> Vec<&SubmoduleInfo> {
+        self.submodule_statuses.values().filter(|s| s.is_dirty()).collect()
+    }
+
+    pub fn all_submodule_paths(&self) -> Vec<PathBuf> {
+        self.submodule_statuses.values().map(|s| s.abs_path.clone()).collect()
     }
 
     fn worktree_entries(&self) -> Vec<&GitEntry> {
@@ -211,19 +222,22 @@ impl GitView {
                         })
                         .collect();
 
+                    let submodules = collect_submodule_statuses(&repo, &git_root);
+
                     info!(
-                        "git2 status: {} entries on branch {:?}",
+                        "git2 status: {} entries, {} submodules on branch {:?}",
                         entries.len(),
+                        submodules.len(),
                         branch
                     );
-                    Ok::<_, git2::Error>((branch, entries))
+                    Ok::<_, git2::Error>((branch, entries, submodules))
                 }
             })
             .await;
 
             match result {
-                Ok(Ok((branch, entries))) => {
-                    let _ = tx.send(Action::GitStatusLoaded { git_root, branch, entries });
+                Ok(Ok((branch, entries, submodules))) => {
+                    let _ = tx.send(Action::GitStatusLoaded { git_root, branch, entries, submodules });
                 }
                 Ok(Err(e)) => {
                     info!("git2 status error: {}", e);
@@ -360,17 +374,35 @@ impl GitView {
             self.left_offset = self.left_cursor + 1 - visible;
         }
 
+        let left_cursor = self.left_cursor;
+        let left_offset = self.left_offset;
+        let left_marked = &self.left_marked;
+        let submodule_statuses = &self.submodule_statuses;
+
         let items: Vec<ListItem> = entries
             .iter()
             .enumerate()
-            .skip(self.left_offset)
+            .skip(left_offset)
             .take(visible)
             .map(|(i, (path, _idx, wt))| {
-                let is_cursor = i == self.left_cursor;
-                let is_marked = self.left_marked.contains(path);
-                let (ch, base_style) = worktree_status_display(wt.as_ref().unwrap(), palette);
+                let is_cursor = i == left_cursor;
+                let is_marked = left_marked.contains(path);
                 let mark = if is_marked { "*" } else { " " };
-                let label = format!(" {} {} {}", mark, ch, path);
+
+                let (label, base_style) = if let Some(sub) = submodule_statuses.get(path.as_str()) {
+                    let badge = submodule_badge(sub);
+                    let branch_hint = sub.branch.as_deref()
+                        .map(|b| format!("  ({})", b))
+                        .unwrap_or_default();
+                    (
+                        format!(" {} ◆ {}  {}{}", mark, path, badge, branch_hint),
+                        palette.git_wt_modified,
+                    )
+                } else {
+                    let (ch, style) = worktree_status_display(wt.as_ref().unwrap(), palette);
+                    (format!(" {} {} {}", mark, ch, path), style)
+                };
+
                 let base = if is_marked { palette.entry_marked } else { base_style };
                 let style = if is_cursor && is_active {
                     base.add_modifier(Modifier::REVERSED)
@@ -445,6 +477,60 @@ impl GitView {
     }
 }
 
+// --- Submodule helpers ---
+
+fn collect_submodule_statuses(
+    repo: &git2::Repository,
+    git_root: &std::path::Path,
+) -> Vec<SubmoduleInfo> {
+    let subs = match repo.submodules() {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    subs.into_iter()
+        .filter_map(|sub| {
+            let rel_path = sub.path().to_string_lossy().into_owned();
+            let abs_path = git_root.join(sub.path());
+            let sub_repo = git2::Repository::open(&abs_path).ok()?;
+            let branch = sub_repo
+                .head()
+                .ok()
+                .and_then(|h| h.shorthand().map(str::to_owned));
+            let mut opts = git2::StatusOptions::new();
+            opts.include_untracked(true).recurse_untracked_dirs(true).include_ignored(false);
+            let statuses = sub_repo.statuses(Some(&mut opts)).ok()?;
+            let mut staged = 0usize;
+            let mut wt_modified = 0usize;
+            let mut wt_untracked = 0usize;
+            for e in statuses.iter() {
+                let s = e.status();
+                if s.intersects(
+                    git2::Status::INDEX_NEW
+                        | git2::Status::INDEX_MODIFIED
+                        | git2::Status::INDEX_DELETED
+                        | git2::Status::INDEX_RENAMED,
+                ) {
+                    staged += 1;
+                }
+                if s.contains(git2::Status::WT_NEW) {
+                    wt_untracked += 1;
+                } else if s.intersects(git2::Status::WT_MODIFIED | git2::Status::WT_DELETED) {
+                    wt_modified += 1;
+                }
+            }
+            Some(SubmoduleInfo { path: rel_path, abs_path, branch, staged, wt_modified, wt_untracked })
+        })
+        .collect()
+}
+
+fn submodule_badge(sub: &SubmoduleInfo) -> String {
+    let mut parts = Vec::new();
+    if sub.staged > 0 { parts.push(format!("+{}", sub.staged)); }
+    if sub.wt_modified > 0 { parts.push(format!("~{}", sub.wt_modified)); }
+    if sub.wt_untracked > 0 { parts.push(format!("?{}", sub.wt_untracked)); }
+    if parts.is_empty() { "[clean]".into() } else { format!("[{}]", parts.join(" ")) }
+}
+
 // --- Display helpers ---
 
 fn worktree_status_display(
@@ -494,7 +580,7 @@ mod tests {
 
     fn view_with(entries: Vec<GitEntry>) -> GitView {
         let mut v = GitView::new(PathBuf::from("/repo"), "main".into());
-        v.on_status_loaded("main".into(), entries);
+        v.on_status_loaded("main".into(), entries, vec![]);
         v
     }
 
@@ -599,7 +685,7 @@ mod tests {
     #[test]
     fn on_status_loaded_updates_branch_name() {
         let mut v = GitView::new(PathBuf::from("/repo"), "main".into());
-        v.on_status_loaded("feature/foo".into(), vec![]);
+        v.on_status_loaded("feature/foo".into(), vec![], vec![]);
         assert_eq!(v.branch, "feature/foo");
     }
 
@@ -607,7 +693,7 @@ mod tests {
     fn on_status_loaded_clamps_cursor_to_new_list_length() {
         let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs"), wt_entry("c.rs")]);
         v.left_cursor = 2;
-        v.on_status_loaded("main".into(), vec![wt_entry("a.rs")]);
+        v.on_status_loaded("main".into(), vec![wt_entry("a.rs")], vec![]);
         assert_eq!(v.left_cursor, 0);
     }
 
@@ -615,7 +701,7 @@ mod tests {
     fn on_status_loaded_drops_stale_marks() {
         let mut v = view_with(vec![wt_entry("a.rs"), wt_entry("b.rs")]);
         v.left_marked.insert("b.rs".into());
-        v.on_status_loaded("main".into(), vec![wt_entry("a.rs")]);
+        v.on_status_loaded("main".into(), vec![wt_entry("a.rs")], vec![]);
         assert!(!v.left_marked.contains("b.rs"));
     }
 }

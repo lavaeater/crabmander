@@ -12,6 +12,7 @@ mod config;
 mod errors;
 mod logging;
 mod palette;
+mod last_paths;
 mod recent_dirs;
 mod tui;
 

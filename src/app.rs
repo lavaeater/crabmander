@@ -18,6 +18,7 @@ use crate::{
     config::{Config, get_data_dir},
     ops::{DeferredOp, OpCtx},
     palette::Palette,
+    last_paths,
     recent_dirs,
     tui::{Event, Tui},
 };
@@ -60,6 +61,7 @@ pub struct App {
     tag_list: Vec<TagInfo>,
     tag_cursor: usize,
     git_watcher: Option<tokio_util::sync::CancellationToken>,
+    super_commit: bool,
     providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
     /// Active long-running operations: (id, label, done, total).
@@ -76,9 +78,12 @@ impl App {
     pub fn new(tick_rate: f64, frame_rate: f64) -> color_eyre::Result<Self> {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
+        let saved = last_paths::load(&get_data_dir());
+        let left_path = saved.left.filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
+        let right_path = saved.right.filter(|p| p.is_dir()).unwrap_or(cwd);
 
-        let mut left = Panel::new(Side::Left, cwd.clone(), action_tx.clone());
-        let right = Panel::new(Side::Right, cwd, action_tx.clone());
+        let mut left = Panel::new(Side::Left, left_path, action_tx.clone());
+        let right = Panel::new(Side::Right, right_path, action_tx.clone());
         left.is_active = true;
 
         let config = Config::new()?;
@@ -111,6 +116,7 @@ impl App {
             tag_list: Vec::new(),
             tag_cursor: 0,
             git_watcher: None,
+            super_commit: false,
             providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
             ops: Vec::new(),
@@ -293,6 +299,7 @@ impl App {
                 KeyCode::Char('r') => tx.send(Action::GitReload)?,
                 KeyCode::Char('t') => tx.send(Action::GitCreateTag)?,
                 KeyCode::Char('T') => tx.send(Action::GitListTags)?,
+                KeyCode::Char('S') => tx.send(Action::GitSuperCommit)?,
                 _ => {}
             }
             return Ok(());
@@ -370,7 +377,14 @@ impl App {
                 Action::Tick => {
                     self.last_tick_key_events.drain(..);
                 }
-                Action::Quit => self.should_quit = true,
+                Action::Quit => {
+                    last_paths::save(
+                        &get_data_dir(),
+                        &self.left.path,
+                        &self.right.path,
+                    );
+                    self.should_quit = true;
+                }
                 Action::Suspend => self.should_suspend = true,
                 Action::Resume => self.should_suspend = false,
                 Action::ClearScreen => tui.terminal.clear()?,
@@ -574,6 +588,7 @@ impl App {
                 Action::GitToggleMark => {
                     if let Some(gv) = &mut self.git_view { gv.toggle_mark(); }
                 }
+                Action::GitSuperCommit => self.do_git_super_commit(),
                 Action::GitAddAllAndCommit => self.do_git_add_all_and_commit(),
                 Action::GitAddAllDone => self.open_commit_textarea(),
                 Action::GitStage => self.do_git_stage(),
@@ -643,9 +658,9 @@ impl App {
                         GitView::load_status(gv.git_root.clone(), self.action_tx.clone());
                     }
                 }
-                Action::GitStatusLoaded { git_root: _, branch, entries } => {
+                Action::GitStatusLoaded { git_root: _, branch, entries, submodules } => {
                     if let Some(gv) = &mut self.git_view {
-                        gv.on_status_loaded(branch, entries);
+                        gv.on_status_loaded(branch, entries, submodules);
                     }
                 }
 
@@ -1116,6 +1131,35 @@ impl App {
             MenuAction::GitPush { follow_tags } => {
                 self.do_git_push_inner(follow_tags);
             }
+            MenuAction::NewBranchInScope { git_root, recursive } => {
+                let submodule_paths = if recursive {
+                    self.git_view.as_ref()
+                        .map(|gv| gv.all_submodule_paths())
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+                let prompt = if recursive {
+                    "Branch name (will be created in parent + all submodules):"
+                } else {
+                    "Branch name:"
+                };
+                if recursive {
+                    self.open_dialog(DialogState::input(
+                        "New Branch",
+                        prompt,
+                        String::new(),
+                        Box::new(OpGitCreateBranchRecursive { git_root, submodule_paths }),
+                    ));
+                } else {
+                    self.open_dialog(DialogState::input(
+                        "New Branch",
+                        prompt,
+                        String::new(),
+                        Box::new(OpGitCreateBranch { git_root }),
+                    ));
+                }
+            }
         }
     }
 
@@ -1345,16 +1389,31 @@ impl App {
     }
 
     fn open_commit_textarea(&mut self) {
+        let title = if self.super_commit {
+            " Super-commit: stages & commits all dirty submodules + parent — Ctrl+Enter to commit, Esc to cancel "
+        } else {
+            " Commit message — Ctrl+Enter or Alt+Enter to commit, Esc to cancel "
+        };
         let mut ta = TextArea::default();
         ta.set_block(
             ratatui::widgets::Block::default()
                 .borders(ratatui::widgets::Borders::ALL)
-                .title(" Commit message — Ctrl+Enter or Alt+Enter to commit, Esc to cancel "),
+                .title(title),
         );
         ta.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
         ta.set_placeholder_text("Summary line\n\nOptional body…");
         self.commit_textarea = Some(ta);
         self.mode = Mode::GitCommit;
+    }
+
+    fn do_git_super_commit(&mut self) {
+        let Some(gv) = &self.git_view else { return };
+        if gv.submodule_statuses.is_empty() {
+            self.last_error = Some("No submodules found in this repository".into());
+            return;
+        }
+        self.super_commit = true;
+        self.open_commit_textarea();
     }
 
     fn do_git_add_all_and_commit(&mut self) {
@@ -1392,26 +1451,73 @@ impl App {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let repo = git2::Repository::open(&git_root)?;
-                let sig = repo.signature()?;
-                let mut index = repo.index()?;
-                let tree_id = index.write_tree()?;
-                let tree = repo.find_tree(tree_id)?;
-                let parent: Option<git2::Commit> =
-                    repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-                let parents: Vec<&git2::Commit> = parent.iter().collect();
-                repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)?;
-                Ok::<_, git2::Error>(())
-            })
-            .await;
-            git_op_result(result, &tx);
-        });
+
+        if self.super_commit {
+            self.super_commit = false;
+            let dirty_sub_paths: Vec<std::path::PathBuf> =
+                gv.dirty_submodules().into_iter().map(|s| s.abs_path.clone()).collect();
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    for sub_path in &dirty_sub_paths {
+                        let sub_repo = git2::Repository::open(sub_path)?;
+                        let mut index = sub_repo.index()?;
+                        index.add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)?;
+                        index.update_all(["."].iter(), None)?;
+                        index.write()?;
+                        let tree_id = index.write_tree()?;
+                        let parent =
+                            sub_repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+                        let needs_commit = parent.as_ref()
+                            .map(|p| p.tree_id() != tree_id)
+                            .unwrap_or(true);
+                        if needs_commit {
+                            let sig = sub_repo.signature()?;
+                            let tree = sub_repo.find_tree(tree_id)?;
+                            let parents: Vec<&git2::Commit> = parent.iter().collect();
+                            sub_repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)?;
+                        }
+                    }
+                    // Stage updated submodule pointers + any other changes in parent, then commit.
+                    let repo = git2::Repository::open(&git_root)?;
+                    let mut index = repo.index()?;
+                    index.add_all(["."].iter(), git2::IndexAddOption::DEFAULT, None)?;
+                    index.update_all(["."].iter(), None)?;
+                    index.write()?;
+                    let sig = repo.signature()?;
+                    let tree_id = index.write_tree()?;
+                    let tree = repo.find_tree(tree_id)?;
+                    let parent: Option<git2::Commit> =
+                        repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+                    let parents: Vec<&git2::Commit> = parent.iter().collect();
+                    repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)?;
+                    Ok::<_, git2::Error>(())
+                })
+                .await;
+                git_op_result(result, &tx);
+            });
+        } else {
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    let repo = git2::Repository::open(&git_root)?;
+                    let sig = repo.signature()?;
+                    let mut index = repo.index()?;
+                    let tree_id = index.write_tree()?;
+                    let tree = repo.find_tree(tree_id)?;
+                    let parent: Option<git2::Commit> =
+                        repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+                    let parents: Vec<&git2::Commit> = parent.iter().collect();
+                    repo.commit(Some("HEAD"), &sig, &sig, &msg, &tree, &parents)?;
+                    Ok::<_, git2::Error>(())
+                })
+                .await;
+                git_op_result(result, &tx);
+            });
+        }
     }
 
     fn cancel_git_commit(&mut self) {
         self.commit_textarea = None;
+        self.super_commit = false;
         self.mode = Mode::Git;
     }
 
@@ -1541,14 +1647,29 @@ impl App {
     fn open_new_branch_dialog(&mut self) {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
-        // Close the branch picker if open, then show the input dialog.
         self.branch_list.clear();
-        self.open_dialog(DialogState::input(
-            "New Branch",
-            "Branch name:",
-            String::new(),
-            Box::new(OpGitCreateBranch { git_root }),
-        ));
+        if !gv.submodule_statuses.is_empty() {
+            self.open_dialog(DialogState::context_menu(
+                "New Branch — Scope",
+                vec![
+                    MenuItem::new(
+                        "Parent repository only",
+                        MenuAction::NewBranchInScope { git_root: git_root.clone(), recursive: false },
+                    ),
+                    MenuItem::new(
+                        "Parent + all submodules",
+                        MenuAction::NewBranchInScope { git_root, recursive: true },
+                    ),
+                ],
+            ));
+        } else {
+            self.open_dialog(DialogState::input(
+                "New Branch",
+                "Branch name:",
+                String::new(),
+                Box::new(OpGitCreateBranch { git_root }),
+            ));
+        }
     }
 
     fn do_git_list_branches(&mut self) {
@@ -1923,6 +2044,58 @@ impl DeferredOp for OpGitCreateBranch {
 }
 
 #[derive(Debug)]
+struct OpGitCreateBranchRecursive {
+    git_root: std::path::PathBuf,
+    submodule_paths: Vec<std::path::PathBuf>,
+}
+impl DeferredOp for OpGitCreateBranchRecursive {
+    fn stays_in_git_mode(&self) -> bool { true }
+
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let name = ctx.input.trim().to_owned();
+        if name.is_empty() { return; }
+        let tx = ctx.tx;
+        let git_root = self.git_root;
+        let submodule_paths = self.submodule_paths;
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                // Create and checkout branch in parent.
+                let repo = git2::Repository::open(&git_root)?;
+                let head_commit = repo.head()?.peel_to_commit()?;
+                let mut branch = repo.branch(&name, &head_commit, false)?;
+                if repo.find_remote("origin").is_ok() {
+                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                }
+                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                repo.checkout_tree(&obj, None)?;
+                repo.set_head(&format!("refs/heads/{}", name))?;
+                // Best-effort: create and checkout the same branch in each submodule.
+                for sub_path in &submodule_paths {
+                    if let Ok(sub_repo) = git2::Repository::open(sub_path) {
+                        if let Ok(commit) = sub_repo.head().and_then(|h| h.peel_to_commit()) {
+                            let created = sub_repo.branch(&name, &commit, false).is_ok();
+                            // If it already existed, just check it out.
+                            let branch_exists = created || sub_repo
+                                .find_branch(&name, git2::BranchType::Local)
+                                .is_ok();
+                            if branch_exists {
+                                if let Ok(obj) = sub_repo.revparse_single(&format!("refs/heads/{}", name)) {
+                                    let _ = sub_repo.checkout_tree(&obj, None);
+                                    let _ = sub_repo.set_head(&format!("refs/heads/{}", name));
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok::<_, git2::Error>(())
+            })
+            .await;
+            git_op_result(result, &tx);
+        });
+    }
+}
+
+#[derive(Debug)]
 struct OpGitTagName {
     git_root: std::path::PathBuf,
 }
@@ -2041,7 +2214,7 @@ fn draw_git_status_bar(
     }
 
     let left = format!(" Git: {}  [{}]", gv.git_root.display(), gv.branch);
-    let hint = " ^G exit  F1 stage  F2 unstage  F3 commit  p push  P pull  F6 branches  n new-branch  r reload ";
+    let hint = " ^G exit  a stage  u unstage  c commit  S super-commit  p push  P pull  b branches  n branch  r reload ";
     let hint_w = hint.len() as u16;
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hint_w)]).areas(area);

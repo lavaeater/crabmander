@@ -21,6 +21,7 @@ pub enum MenuAction {
     SetTheme(String),
     CdTo(std::path::PathBuf),
     GitPush { follow_tags: bool },
+    NewBranchInScope { git_root: std::path::PathBuf, recursive: bool },
 }
 
 #[derive(Debug, Clone)]

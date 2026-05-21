@@ -28,6 +28,22 @@ pub struct GitEntry {
     pub worktree: Option<GitWorktreeStatus>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmoduleInfo {
+    pub path: String,
+    pub abs_path: PathBuf,
+    pub branch: Option<String>,
+    pub staged: usize,
+    pub wt_modified: usize,
+    pub wt_untracked: usize,
+}
+
+impl SubmoduleInfo {
+    pub fn is_dirty(&self) -> bool {
+        self.staged > 0 || self.wt_modified > 0 || self.wt_untracked > 0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Side {
     Left,
@@ -180,6 +196,7 @@ pub enum Action {
     // Git mode
     EnterGitMode,
     ExitGitMode,
+    GitSuperCommit,
     GitNavUp,
     GitNavDown,
     GitSwitchPane,
@@ -225,6 +242,7 @@ pub enum Action {
         git_root: PathBuf,
         branch: String,
         entries: Vec<GitEntry>,
+        submodules: Vec<SubmoduleInfo>,
     },
     #[strum(to_string = "GitBranchesLoaded")]
     GitBranchesLoaded {
