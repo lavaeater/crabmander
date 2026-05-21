@@ -182,6 +182,7 @@ pub enum Action {
     DialogInputBackspace,
     DialogConfirm,
     DialogCancel,
+    DialogDeleteSelected,
 
     SelectTheme,  // F11
     RecentDirs,   // Shift-F1

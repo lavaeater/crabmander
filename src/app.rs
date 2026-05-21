@@ -18,6 +18,7 @@ use crate::{
     config::{Config, get_data_dir},
     ops::{DeferredOp, OpCtx},
     palette::Palette,
+    bookmarks,
     last_paths,
     recent_dirs,
     tui::{Event, Tui},
@@ -64,6 +65,7 @@ pub struct App {
     super_commit: bool,
     providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
+    bookmarks: Vec<std::path::PathBuf>,
     /// Active long-running operations: (id, label, done, total).
     ops: Vec<(u64, String, u64, u64)>,
     next_op_id: u64,
@@ -119,6 +121,7 @@ impl App {
             super_commit: false,
             providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
+            bookmarks: bookmarks::load(&get_data_dir()),
             ops: Vec::new(),
             next_op_id: 0,
             should_quit: false,
@@ -204,6 +207,7 @@ impl App {
                 KeyCode::Esc => tx.send(Action::DialogCancel)?,
                 KeyCode::Up => tx.send(Action::DialogNavUp)?,
                 KeyCode::Down => tx.send(Action::DialogNavDown)?,
+                KeyCode::Delete if !is_qcd => tx.send(Action::DialogDeleteSelected)?,
 
                 // QuickCd-specific
                 KeyCode::Tab if is_qcd => tx.send(Action::QuickCdComplete)?,
@@ -559,6 +563,8 @@ impl App {
                     }
                 }
 
+                Action::DialogDeleteSelected => self.dialog_delete_selected(),
+
                 Action::SelectTheme => self.open_theme_selector(),
                 Action::RecentDirs => self.open_recent_dirs_menu(),
 
@@ -882,20 +888,25 @@ impl App {
     }
 
     fn open_recent_dirs_menu(&mut self) {
-        if self.recent_dirs.is_empty() {
-            self.last_error = Some("No recent directories — use F1 to navigate first".into());
-            return;
+        let current_dir = self.active_panel().path.clone();
+        let mut items: Vec<MenuItem> = Vec::new();
+
+        items.push(MenuItem::new(
+            format!("★ Bookmark  {}", current_dir.display()),
+            MenuAction::AddBookmark(current_dir),
+        ));
+
+        if self.recent_dirs.is_empty() && items.len() == 1 {
+            // Only the bookmark action, no recents yet — still open so user can bookmark.
         }
-        let items: Vec<MenuItem> = self
-            .recent_dirs
-            .iter()
-            .map(|p| {
-                MenuItem::new(
-                    p.to_string_lossy().into_owned(),
-                    MenuAction::CdTo(p.clone()),
-                )
-            })
-            .collect();
+
+        for p in &self.recent_dirs {
+            items.push(
+                MenuItem::new(p.to_string_lossy().into_owned(), MenuAction::CdTo(p.clone()))
+                    .with_delete(MenuAction::RemoveRecent(p.clone())),
+            );
+        }
+
         self.open_dialog(DialogState::context_menu("Recent Directories", items));
     }
 
@@ -921,23 +932,54 @@ impl App {
     }
 
     fn open_context_menu(&mut self) {
-        let Some(entry) = self.active_panel().current_entry() else { return };
-        if entry.name == ".." { return; }
+        let panel_dir = self.active_panel().path.clone();
+        let other_dir = self.get_panel(self.active.other()).path.clone();
+        let active_side = self.active;
 
-        let ctx = MenuCtx {
-            entry_path: self.active_panel().path.join(&entry.name),
-            panel_dir: self.active_panel().path.clone(),
-            other_dir: self.get_panel(self.active.other()).path.clone(),
-            effective_targets: self.active_panel().effective_targets(),
-            active_side: self.active,
-            entry: entry.clone(),
-        };
-        let title = format!("Actions: {}", ctx.entry.name);
-
-        let items: Vec<MenuItem> = self.providers
+        // Bookmark items are always shown (deletable).
+        let mut items: Vec<MenuItem> = self
+            .bookmarks
             .iter()
-            .flat_map(|p| p.items(&ctx))
+            .map(|p| {
+                MenuItem::new(
+                    format!("★ {}", p.display()),
+                    MenuAction::CdTo(p.clone()),
+                )
+                .with_delete(MenuAction::RemoveBookmark(p.clone()))
+            })
             .collect();
+
+        // File-operation items are only added when cursor is on a real entry.
+        let entry = self.active_panel().current_entry();
+        let has_file = entry.as_ref().map(|e| e.name != "..").unwrap_or(false);
+
+        let title = if has_file {
+            format!("Actions: {}", entry.as_ref().unwrap().name)
+        } else {
+            "Quick Access".to_string()
+        };
+
+        if has_file {
+            let entry = entry.unwrap().clone();
+            let ctx = MenuCtx {
+                entry_path: panel_dir.join(&entry.name),
+                panel_dir: panel_dir.clone(),
+                other_dir,
+                effective_targets: self.active_panel().effective_targets(),
+                active_side,
+                entry,
+            };
+            let file_items: Vec<MenuItem> = self.providers
+                .iter()
+                .flat_map(|p| p.items(&ctx))
+                .collect();
+            items.extend(file_items);
+        }
+
+        if items.is_empty() {
+            self.last_error = Some("No bookmarks — use Shift+F1 to add one".into());
+            return;
+        }
 
         self.open_dialog(DialogState::context_menu(title, items));
     }
@@ -996,6 +1038,28 @@ impl App {
     fn dialog_cancel(&mut self) {
         self.dialog = None;
         self.mode = self.dialog_prior_mode;
+    }
+
+    fn dialog_delete_selected(&mut self) {
+        let delete_action = if let Some(DialogState::ContextMenu { items, selected, .. }) = &mut self.dialog {
+            let idx = *selected;
+            let Some(da) = items.get(idx).and_then(|i| i.delete_action.clone()) else {
+                return;
+            };
+            items.remove(idx);
+            if *selected >= items.len() && !items.is_empty() {
+                *selected = items.len() - 1;
+            }
+            da
+        } else {
+            return;
+        };
+        self.execute_menu_action(delete_action);
+        // Close the dialog if all deletable items are gone and nothing else remains.
+        if matches!(&self.dialog, Some(DialogState::ContextMenu { items, .. }) if items.is_empty()) {
+            self.dialog = None;
+            self.mode = self.dialog_prior_mode;
+        }
     }
 
     fn execute_menu_action(&mut self, action: MenuAction) {
@@ -1130,6 +1194,18 @@ impl App {
             }
             MenuAction::GitPush { follow_tags } => {
                 self.do_git_push_inner(follow_tags);
+            }
+            MenuAction::AddBookmark(path) => {
+                bookmarks::add(&mut self.bookmarks, path);
+                bookmarks::save(&get_data_dir(), &self.bookmarks);
+            }
+            MenuAction::RemoveBookmark(path) => {
+                bookmarks::remove(&mut self.bookmarks, &path);
+                bookmarks::save(&get_data_dir(), &self.bookmarks);
+            }
+            MenuAction::RemoveRecent(path) => {
+                self.recent_dirs.retain(|p| p != &path);
+                recent_dirs::save(&get_data_dir(), &self.recent_dirs);
             }
             MenuAction::NewBranchInScope { git_root, recursive } => {
                 let submodule_paths = if recursive {

@@ -22,12 +22,17 @@ pub enum MenuAction {
     CdTo(std::path::PathBuf),
     GitPush { follow_tags: bool },
     NewBranchInScope { git_root: std::path::PathBuf, recursive: bool },
+    AddBookmark(PathBuf),
+    RemoveBookmark(PathBuf),
+    RemoveRecent(PathBuf),
 }
 
 #[derive(Debug, Clone)]
 pub struct MenuItem {
     pub label: String,
     pub action: MenuAction,
+    /// Action to execute when Delete is pressed on this item (removes it from the list).
+    pub delete_action: Option<MenuAction>,
 }
 
 impl MenuItem {
@@ -35,7 +40,13 @@ impl MenuItem {
         Self {
             label: label.into(),
             action,
+            delete_action: None,
         }
+    }
+
+    pub fn with_delete(mut self, action: MenuAction) -> Self {
+        self.delete_action = Some(action);
+        self
     }
 }
 
@@ -277,7 +288,9 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
         }
 
         DialogState::ContextMenu { title, items, selected } => {
-            let height = (items.len() as u16 + 4).min(area.height.saturating_sub(2));
+            let has_deletable = items.iter().any(|i| i.delete_action.is_some());
+            let hint_height: u16 = if has_deletable { 1 } else { 0 };
+            let height = (items.len() as u16 + 4 + hint_height).min(area.height.saturating_sub(2));
             let popup = centered_rect(50, height, area);
             frame.render_widget(Clear, popup);
 
@@ -287,6 +300,10 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
                 .title(format!(" {} ", title));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
+
+            let [list_area, hint_area] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(hint_height)])
+                    .areas(inner);
 
             let list_items: Vec<ListItem> = items
                 .iter()
@@ -303,7 +320,16 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
 
             let mut state = ListState::default();
             state.select(Some(*selected));
-            frame.render_stateful_widget(List::new(list_items), inner, &mut state);
+            frame.render_stateful_widget(List::new(list_items), list_area, &mut state);
+
+            if has_deletable {
+                frame.render_widget(
+                    Paragraph::new("↑↓ select   ↵ open   Del remove   Esc cancel")
+                        .alignment(Alignment::Center)
+                        .style(Style::default().add_modifier(Modifier::DIM)),
+                    hint_area,
+                );
+            }
         }
 
         DialogState::ErrorList { title, errors, scroll } => {
