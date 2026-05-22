@@ -12,13 +12,15 @@ use crate::{
         context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
         dialog::{self, DialogState, MenuAction, MenuItem},
         func_bar::{self, FuncBarMode},
-        git_view::GitView,
+        git_view::{GitView, GitViewTab},
+        global_git_view::GlobalGitView,
         panel::{Panel, copy_recursive, delete_recursive, extract_archive_sync, file_name_of},
     },
     config::{Config, get_data_dir},
     ops::{DeferredOp, OpCtx},
     palette::Palette,
     bookmarks,
+    git_repos,
     last_paths,
     recent_dirs,
     tui::{Event, Tui},
@@ -33,6 +35,7 @@ pub enum Mode {
     GitCommit,
     GitBranch,
     GitTag,
+    GlobalGit,
     Cargo,
 }
 
@@ -62,6 +65,9 @@ pub struct App {
     tag_list: Vec<TagInfo>,
     tag_cursor: usize,
     git_watcher: Option<tokio_util::sync::CancellationToken>,
+    git_repos: Vec<std::path::PathBuf>,
+    global_git_view: Option<GlobalGitView>,
+    git_from_global: bool,
     super_commit: bool,
     providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
@@ -118,6 +124,9 @@ impl App {
             tag_list: Vec::new(),
             tag_cursor: 0,
             git_watcher: None,
+            git_repos: git_repos::load(&get_data_dir()),
+            global_git_view: None,
+            git_from_global: false,
             super_commit: false,
             providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
@@ -304,6 +313,31 @@ impl App {
                 KeyCode::Char('t') => tx.send(Action::GitCreateTag)?,
                 KeyCode::Char('T') => tx.send(Action::GitListTags)?,
                 KeyCode::Char('S') => tx.send(Action::GitSuperCommit)?,
+                // Tab switching
+                KeyCode::Char('s') => tx.send(Action::GitTabStatus)?,
+                KeyCode::Char('l') => tx.send(Action::GitTabLog)?,
+                KeyCode::Char('g') => tx.send(Action::GitTabGraph)?,
+                KeyCode::Char('R') => tx.send(Action::GitTabReflog)?,
+                KeyCode::Char('d') => tx.send(Action::GitTabDiff)?,
+                KeyCode::Char('B') => tx.send(Action::GitTabBlame)?,
+                KeyCode::PageUp => {
+                    if let Some(gv) = &mut self.git_view { gv.tab_page_up(10); }
+                }
+                KeyCode::PageDown => {
+                    if let Some(gv) = &mut self.git_view { gv.tab_page_down(10); }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
+        if self.mode == Mode::GlobalGit {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGlobalGitView)?,
+                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GlobalGitNavUp)?,
+                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GlobalGitNavDown)?,
+                KeyCode::Enter => tx.send(Action::GlobalGitSelect)?,
+                KeyCode::Char('d') | KeyCode::Delete => tx.send(Action::GlobalGitRemove)?,
                 _ => {}
             }
             return Ok(());
@@ -328,7 +362,7 @@ impl App {
             return Ok(());
         }
 
-        // Ctrl+G enters git mode when the active panel is inside a git repo.
+        // Ctrl+G enters git mode and bookmarks the repo.
         if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('g') {
             if self.active_panel().git_branch.is_some() {
                 tx.send(Action::EnterGitMode)?;
@@ -583,10 +617,10 @@ impl App {
                 Action::EnterGitMode => self.enter_git_mode(),
                 Action::ExitGitMode => self.exit_git_mode(),
                 Action::GitNavUp => {
-                    if let Some(gv) = &mut self.git_view { gv.nav_up(); }
+                    if let Some(gv) = &mut self.git_view { gv.tab_nav_up(); }
                 }
                 Action::GitNavDown => {
-                    if let Some(gv) = &mut self.git_view { gv.nav_down(); }
+                    if let Some(gv) = &mut self.git_view { gv.tab_nav_down(); }
                 }
                 Action::GitSwitchPane => {
                     if let Some(gv) = &mut self.git_view { gv.switch_pane(); }
@@ -670,6 +704,56 @@ impl App {
                     }
                 }
 
+                // --- Global git view ---
+                Action::GlobalGitView => self.enter_global_git_mode(),
+                Action::ExitGlobalGitView => self.exit_global_git_mode(),
+                Action::GlobalGitNavUp => {
+                    if let Some(ggv) = &mut self.global_git_view { ggv.nav_up(); }
+                }
+                Action::GlobalGitNavDown => {
+                    if let Some(ggv) = &mut self.global_git_view { ggv.nav_down(); }
+                }
+                Action::GlobalGitSelect => self.do_global_git_select(),
+                Action::GlobalGitRemove => self.do_global_git_remove(),
+                Action::GitRepoInfoLoaded { path, branch, is_dirty } => {
+                    if let Some(ggv) = &mut self.global_git_view {
+                        ggv.on_repo_info_loaded(path, branch, is_dirty);
+                    }
+                }
+                Action::EnterGitModeForRepo { git_root } => {
+                    self.enter_git_mode_for_repo(git_root);
+                }
+
+                // --- Git view tabs ---
+                Action::GitTabStatus => {
+                    if let Some(gv) = &mut self.git_view { gv.switch_tab(GitViewTab::Status); }
+                }
+                Action::GitTabLog => self.do_git_tab_log(),
+                Action::GitTabGraph => self.do_git_tab_graph(),
+                Action::GitTabReflog => self.do_git_tab_reflog(),
+                Action::GitTabDiff => self.do_git_tab_diff(),
+                Action::GitTabBlame => self.do_git_tab_blame(),
+                Action::GitCommitsLoaded { git_root: _, commits } => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.on_commits_loaded(commits);
+                    }
+                }
+                Action::GitReflogLoaded { git_root: _, entries } => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.on_reflog_loaded(entries);
+                    }
+                }
+                Action::GitBlameLoaded { git_root: _, path, lines } => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.on_blame_loaded(path, lines);
+                    }
+                }
+                Action::GitDiffLoaded { git_root: _, path, lines } => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.on_diff_loaded(path, lines);
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -685,6 +769,8 @@ impl App {
         let git_view = &mut self.git_view;
         let cargo_view = &self.cargo_view;
         let git_mode = matches!(self.mode, Mode::Git | Mode::GitCommit | Mode::GitBranch | Mode::GitTag);
+        let global_git_mode = self.mode == Mode::GlobalGit;
+        let global_git_view = &mut self.global_git_view;
         let cargo_mode = self.mode == Mode::Cargo;
         let commit_textarea = &mut self.commit_textarea;
         let branch_list = &self.branch_list;
@@ -705,7 +791,11 @@ impl App {
             ])
             .areas(area);
 
-            if git_mode {
+            if global_git_mode {
+                if let Some(ggv) = global_git_view.as_mut() {
+                    ggv.draw(frame, panels_area, palette);
+                }
+            } else if git_mode {
                 if let Some(gv) = git_view.as_mut() {
                     draw_git_status_bar(frame, status_area, gv, last_error.as_deref(), palette);
                     gv.draw(frame, panels_area, palette);
@@ -735,7 +825,9 @@ impl App {
                 }
             }
 
-            let fb_mode = if git_mode {
+            let fb_mode = if global_git_mode {
+                FuncBarMode::GlobalGit
+            } else if git_mode {
                 FuncBarMode::Git
             } else if cargo_mode {
                 FuncBarMode::Cargo
@@ -1368,6 +1460,27 @@ impl App {
         let panel = self.active_panel();
         let branch = panel.git_branch.clone().unwrap_or_default();
         let Some(git_root) = find_git_root(&panel.path) else { return };
+        // Bookmark this repo in the global list.
+        git_repos::add(&mut self.git_repos, git_root.clone());
+        git_repos::save(&crate::config::get_data_dir(), &self.git_repos);
+        self.git_from_global = false;
+        self.enter_git_mode_inner(git_root, branch);
+    }
+
+    fn enter_git_mode_for_repo(&mut self, git_root: std::path::PathBuf) {
+        let branch = git2::Repository::open(&git_root)
+            .ok()
+            .and_then(|r| {
+                let head = r.head().ok()?;
+                let name = head.shorthand().ok()?.to_owned();
+                Some(name)
+            })
+            .unwrap_or_default();
+        self.git_from_global = true;
+        self.enter_git_mode_inner(git_root, branch);
+    }
+
+    fn enter_git_mode_inner(&mut self, git_root: std::path::PathBuf, branch: String) {
         let gv = GitView::new(git_root.clone(), branch);
         GitView::load_status(git_root.clone(), self.action_tx.clone());
         self.git_view = Some(gv);
@@ -1380,11 +1493,96 @@ impl App {
         if let Some(token) = self.git_watcher.take() {
             token.cancel();
         }
-        self.mode = Mode::Normal;
         self.git_view = None;
-        // Reload both panels in case git ops changed the filesystem.
-        self.left.reload();
-        self.right.reload();
+        if self.git_from_global {
+            // Return to the global git view instead of Normal mode.
+            self.git_from_global = false;
+            self.mode = Mode::GlobalGit;
+        } else {
+            self.mode = Mode::Normal;
+            // Reload both panels in case git ops changed the filesystem.
+            self.left.reload();
+            self.right.reload();
+        }
+    }
+
+    fn enter_global_git_mode(&mut self) {
+        let repos = self.git_repos.clone();
+        let ggv = GlobalGitView::new(repos.clone());
+        GlobalGitView::load_all_meta(repos, self.action_tx.clone());
+        self.global_git_view = Some(ggv);
+        self.mode = Mode::GlobalGit;
+        self.last_error = None;
+    }
+
+    fn exit_global_git_mode(&mut self) {
+        self.global_git_view = None;
+        self.mode = Mode::Normal;
+    }
+
+    fn do_global_git_select(&mut self) {
+        let Some(ggv) = &self.global_git_view else { return };
+        let Some(path) = ggv.selected_repo().cloned() else { return };
+        let _ = self.action_tx.send(Action::EnterGitModeForRepo { git_root: path });
+    }
+
+    fn do_global_git_remove(&mut self) {
+        let Some(ggv) = &mut self.global_git_view else { return };
+        if let Some(removed) = ggv.remove_selected() {
+            git_repos::remove(&mut self.git_repos, &removed);
+            git_repos::save(&crate::config::get_data_dir(), &self.git_repos);
+        }
+    }
+
+    fn do_git_tab_log(&mut self) {
+        let Some(gv) = &mut self.git_view else { return };
+        if gv.log_commits.is_empty() {
+            let git_root = gv.git_root.clone();
+            GitView::load_log(git_root, self.action_tx.clone());
+        }
+        gv.switch_tab(GitViewTab::Log);
+    }
+
+    fn do_git_tab_graph(&mut self) {
+        let Some(gv) = &mut self.git_view else { return };
+        if gv.graph_rows.is_empty() {
+            let git_root = gv.git_root.clone();
+            GitView::load_log(git_root, self.action_tx.clone());
+        }
+        gv.switch_tab(GitViewTab::Graph);
+    }
+
+    fn do_git_tab_reflog(&mut self) {
+        let Some(gv) = &mut self.git_view else { return };
+        if gv.reflog_entries.is_empty() {
+            let git_root = gv.git_root.clone();
+            GitView::load_reflog(git_root, self.action_tx.clone());
+        }
+        gv.switch_tab(GitViewTab::Reflog);
+    }
+
+    fn do_git_tab_diff(&mut self) {
+        let Some(gv) = &mut self.git_view else { return };
+        let path = gv.status_cursor_path();
+        if let Some(p) = path {
+            if gv.diff_path.as_deref() != Some(&p) {
+                let git_root = gv.git_root.clone();
+                GitView::load_diff(git_root, p, self.action_tx.clone());
+            }
+        }
+        gv.switch_tab(GitViewTab::Diff);
+    }
+
+    fn do_git_tab_blame(&mut self) {
+        let Some(gv) = &mut self.git_view else { return };
+        let path = gv.status_cursor_path();
+        if let Some(p) = path {
+            if gv.blame_path.as_deref() != Some(&p) {
+                let git_root = gv.git_root.clone();
+                GitView::load_blame(git_root, p, self.action_tx.clone());
+            }
+        }
+        gv.switch_tab(GitViewTab::Blame);
     }
 
     fn enter_cargo_mode(&mut self) {
@@ -1625,8 +1823,8 @@ impl App {
                 let branch = repo
                     .head()?
                     .shorthand()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "main".into());
+                    .unwrap_or("main")
+                    .to_owned();
                 let mut remote = repo.find_remote("origin")?;
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(git2_cred_callback);
@@ -1674,8 +1872,8 @@ impl App {
                 let branch = repo
                     .head()?
                     .shorthand()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "main".into());
+                    .unwrap_or("main")
+                    .to_owned();
                 let mut remote = repo.find_remote("origin")?;
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(git2_cred_callback);
@@ -1822,6 +2020,8 @@ impl App {
                         if let Ok(tag_obj) = repo.find_tag(oid) {
                             let msg = tag_obj
                                 .message()
+                                .ok()
+                                .flatten()
                                 .map(|m| m.trim().to_owned())
                                 .filter(|m| !m.is_empty());
                             let target = tag_obj

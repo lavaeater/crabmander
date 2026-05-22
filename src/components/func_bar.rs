@@ -5,16 +5,17 @@ use crate::palette::Palette;
 const NORMAL_KEYS: &[(&str, &str)] = &[
     ("F1", "QuickCD"),
     ("⇧F1", "Recent"),
-    ("F2", "Menu"),
-    ("F3", "Nano"),
-    ("F4", "Sizes"),
-    ("F5", "Copy"),
-    ("F6", "Move"),
-    ("F7", "MkDir"),
-    ("F8", "Delete"),
-    ("F9", "Sort"),
+    ("F2/⇧X", "Menu"),
+    ("F3/⇧E", "View"),
+    ("F4/⇧Z", "Sizes"),
+    ("F5/⇧Y", "Copy"),
+    ("F6/⇧R", "Move"),
+    ("F7/⇧K", "MkDir"),
+    ("F8/⇧D", "Delete"),
+    ("F9/⇧S", "Sort"),
     ("F10", "Quit"),
-    ("F11", "Theme"),
+    ("F11/⇧T", "Theme"),
+    ("F12/⇧G", "GitRepos"),
 ];
 
 const GIT_KEYS: &[(&str, &str)] = &[
@@ -42,13 +43,23 @@ const CARGO_KEYS: &[(&str, &str)] = &[
 
 pub enum FuncBarMode {
     Normal,
+    GlobalGit,
     Git,
     Cargo,
 }
 
+const GLOBAL_GIT_KEYS: &[(&str, &str)] = &[
+    ("↑↓", "Navigate"),
+    ("j/k", "Navigate"),
+    ("Enter", "Open"),
+    ("d/Del", "Remove"),
+    ("Esc/q", "Back"),
+];
+
 pub fn draw(frame: &mut Frame, area: Rect, mode: FuncBarMode, palette: &Palette) {
     let (keys, key_style) = match mode {
         FuncBarMode::Normal => (NORMAL_KEYS, palette.funcbar_normal),
+        FuncBarMode::GlobalGit => (GLOBAL_GIT_KEYS, palette.funcbar_git),
         FuncBarMode::Git => (GIT_KEYS, palette.funcbar_git),
         FuncBarMode::Cargo => (CARGO_KEYS, palette.funcbar_cargo),
     };

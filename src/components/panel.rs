@@ -963,7 +963,7 @@ async fn detect_git_info(start: &Path) -> (Option<String>, bool) {
         let branch = repo
             .head()
             .ok()
-            .and_then(|h| h.shorthand().map(str::to_owned))
+            .and_then(|h| h.shorthand().ok().map(str::to_owned))
             .unwrap_or_else(|| "HEAD".into());
         let is_dirty = repo
             .statuses(Some(

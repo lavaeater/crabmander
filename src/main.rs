@@ -13,6 +13,7 @@ mod errors;
 mod logging;
 mod palette;
 mod bookmarks;
+mod git_repos;
 mod last_paths;
 mod recent_dirs;
 mod tui;

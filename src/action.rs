@@ -3,6 +3,58 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use strum::Display;
 
+// --- Git log / graph / reflog / blame types ---
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    pub id: String,
+    pub id_short: String,
+    pub summary: String,
+    pub author: String,
+    pub timestamp: i64,
+    /// Ref decorations, e.g. "HEAD -> main", "origin/main", "v1.0"
+    pub refs: Vec<String>,
+    pub parent_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitReflogEntry {
+    pub new_id: String,
+    pub message: String,
+    pub timestamp: i64,
+    pub committer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitBlameLine {
+    pub line_no: usize,
+    pub content: String,
+    pub commit_id: String,
+    pub commit_short: String,
+    pub author: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffSegment {
+    Context(String),
+    Added(String),
+    Removed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub segments: Vec<DiffSegment>,
+}
+
+/// One bookmarked git repo with optional metadata loaded from disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitRepoInfo {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub is_dirty: bool,
+}
+
 // --- Git status types ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +238,58 @@ pub enum Action {
 
     SelectTheme,  // F11
     RecentDirs,   // Shift-F1
+
+    // Global git view (F12 / Shift+G)
+    GlobalGitView,
+    GlobalGitNavUp,
+    GlobalGitNavDown,
+    GlobalGitSelect,
+    GlobalGitRemove,
+    ExitGlobalGitView,
+    #[strum(to_string = "GitRepoInfoLoaded")]
+    GitRepoInfoLoaded {
+        path: PathBuf,
+        branch: Option<String>,
+        is_dirty: bool,
+    },
+
+    // Enter git mode for a specific repo (from global git view)
+    #[strum(to_string = "EnterGitModeForRepo")]
+    EnterGitModeForRepo {
+        git_root: PathBuf,
+    },
+
+    // Git view tab switching
+    GitTabStatus,
+    GitTabLog,
+    GitTabGraph,
+    GitTabReflog,
+    GitTabDiff,
+    GitTabBlame,
+
+    // Async data for new git tabs
+    #[strum(to_string = "GitCommitsLoaded")]
+    GitCommitsLoaded {
+        git_root: PathBuf,
+        commits: Vec<GitCommit>,
+    },
+    #[strum(to_string = "GitReflogLoaded")]
+    GitReflogLoaded {
+        git_root: PathBuf,
+        entries: Vec<GitReflogEntry>,
+    },
+    #[strum(to_string = "GitBlameLoaded")]
+    GitBlameLoaded {
+        git_root: PathBuf,
+        path: String,
+        lines: Vec<GitBlameLine>,
+    },
+    #[strum(to_string = "GitDiffLoaded")]
+    GitDiffLoaded {
+        git_root: PathBuf,
+        path: String,
+        lines: Vec<DiffLine>,
+    },
 
     // Cargo mode
     EnterCargoMode,

@@ -50,14 +50,15 @@ afterward to hardcode your preferred terminal if needed.
 
 ## Modes
 
-Crabmander has four operating modes:
+Crabmander has several operating modes:
 
-| Mode           | Description                                                         |
-|----------------|---------------------------------------------------------------------|
-| **Normal**     | Twin-pane file manager (default)                                    |
-| **Git**        | Git staging area view (enter with `Ctrl+G` in a git repo)          |
-| **Git Commit** | Multi-line commit message editor (entered from Git mode)            |
-| **Git Branch** | Branch list / switcher (entered from Git mode with `F6` / `b`)     |
+| Mode              | Description                                                                        |
+|-------------------|------------------------------------------------------------------------------------|
+| **Normal**        | Twin-pane file manager (default)                                                   |
+| **Git**           | Git client view — staging, log, graph, reflog, diff, blame tabs                    |
+| **Git Commit**    | Multi-line commit message editor (entered from Git mode)                           |
+| **Git Branch**    | Branch list / switcher (entered from Git mode with `F6` / `b`)                    |
+| **Git Repos**     | Global bookmarked git repo list (`F12` / `Shift+G` from Normal mode)              |
 
 ---
 
@@ -93,23 +94,27 @@ marked count and cumulative size.
 
 ### Function keys
 
-| Key         | Action                                                                           |
-|-------------|----------------------------------------------------------------------------------|
-| `F1`        | **Quick CD** — incremental directory navigator (see below)                       |
-| `Shift+F1`  | **Recent dirs** — jump to a previously visited directory                         |
-| `F2`        | **Context menu** — file-type-aware actions (see below)                           |
-| `F3`        | **Nano** — open a file in nano                                                   |
-| `F4`        | **Sizes** — recursively calculate directory sizes; auto-sorts by size descending |
-| `F5`        | **Copy** — copy marked/cursor files to the other panel's directory               |
-| `F6`        | **Move** — move marked/cursor files to the other panel's directory               |
-| `F7`        | **MkDir** — create a new directory in the active panel                           |
-| `F8`        | **Delete** — delete marked/cursor files (with confirmation)                      |
-| `F9`        | **Sort** — cycle sort column: Name → Size → Modified                             |
-| `Shift+F9`  | **Invert sort** — toggle ascending ↑ / descending ↓                              |
-| `F10` / `q` | Quit                                                                             |
-| `F11`       | **Select theme** — live-preview built-in color themes                            |
-| `Ctrl+G`    | **Enter Git mode** (only when active panel is inside a git repo)                 |
-| `Ctrl+Z`    | Suspend to background                                                            |
+Each F-key has a `Shift+letter` fallback for terminals or compositors that intercept
+function keys (e.g. COSMIC desktop).
+
+| Key            | Fallback  | Action                                                                          |
+|----------------|-----------|---------------------------------------------------------------------------------|
+| `F1`           |           | **Quick CD** — incremental directory navigator (see below)                      |
+| `Shift+F1`     |           | **Recent dirs** — jump to a previously visited directory                        |
+| `F2`           | `Shift+X` | **Context menu** — file-type-aware actions (see below)                          |
+| `F3`           | `Shift+E` | **View** — open the cursor file in nano                                         |
+| `F4`           | `Shift+Z` | **Sizes** — recursively calculate directory sizes, auto-sorts by size           |
+| `F5`           | `Shift+Y` | **Copy** — copy marked/cursor files to the other panel's directory              |
+| `F6`           | `Shift+R` | **Move** — move marked/cursor files to the other panel's directory              |
+| `F7`           | `Shift+K` | **MkDir** — create a new directory in the active panel                          |
+| `F8`           | `Shift+D` | **Delete** — delete marked/cursor files (with confirmation)                     |
+| `F9`           | `Shift+S` | **Sort** — cycle sort column: Name → Size → Modified                            |
+| `Shift+F9`     |           | **Invert sort** — toggle ascending ↑ / descending ↓                             |
+| `F10` / `q`    |           | Quit                                                                            |
+| `F11`          | `Shift+T` | **Select theme** — live-preview built-in color themes                           |
+| `F12`          | `Shift+G` | **Git Repos** — global bookmarked git repository list (see below)               |
+| `Ctrl+G`       |           | **Enter Git mode** — opens git client for the active repo, bookmarks it         |
+| `Ctrl+Z`       |           | Suspend to background                                                           |
 
 ### Quick CD (F1)
 
@@ -174,11 +179,32 @@ The active sort column is indicated by an arrow in the column header
 
 ---
 
+## Keyboard reference — Git Repos (global git view)
+
+Open with `F12` / `Shift+G` from Normal mode. Shows all git repositories you have
+previously visited via `Ctrl+G`, most-recently-used first. Each row shows the path,
+current branch, and dirty status.
+
+| Key              | Action                                             |
+|------------------|----------------------------------------------------|
+| `↑` / `k`        | Move cursor up                                     |
+| `↓` / `j`        | Move cursor down                                   |
+| `Enter`          | Open git client for the selected repository        |
+| `d` / `Delete`   | Remove repo from the list                          |
+| `Esc` / `q`      | Return to Normal mode                              |
+
+When you open a repo from this view, pressing `Esc` in the git client returns
+you back here rather than to Normal mode.
+
+---
+
 ## Keyboard reference — Git mode
 
 Enter Git mode with `Ctrl+G` when the active panel is inside a git repository.
-The display switches to a twin-pane staging view: **Working Tree** on the left,
-**Staging Area** on the right.
+The repo is automatically added to the global git repo list.
+
+The git view has six tabs shown in a tab bar at the top of the screen.
+Switch tabs with the letter keys listed below.
 
 File status symbols:
 
@@ -191,7 +217,20 @@ File status symbols:
 | `R`    | —                      | Renamed                |
 | `C`    | —                      | Copied                 |
 
-### Git mode keys
+### Tab switching (all tabs)
+
+| Key         | Tab                                                      |
+|-------------|----------------------------------------------------------|
+| `s`         | **Status** — staging view (default)                      |
+| `l`         | **Log** — `git log --oneline --decorate`                 |
+| `g`         | **Graph** — ASCII commit graph                           |
+| `R`         | **Reflog** — `git reflog --date=iso --pretty`            |
+| `d`         | **Diff** — word-diff of cursor file in Status tab        |
+| `B`         | **Blame** — deep blame (`-C -C -C`) of cursor file       |
+
+All tabs: `↑`/`k` up, `↓`/`j` down, `PgUp`/`PgDn` page scroll.
+
+### Status tab keys
 
 | Key              | Action                                                              |
 |------------------|---------------------------------------------------------------------|
@@ -202,13 +241,13 @@ File status symbols:
 | `F1` / `a`       | **Stage** — stage marked/cursor files from the Working Tree         |
 | `F2` / `u`       | **Unstage** — unstage marked/cursor files from the Staging Area     |
 | `F3` / `c`       | **Commit** — open multi-line commit message editor                  |
-| `F4` / `p`       | **Push** — push current branch to remote                           |
+| `F4` / `p`       | **Push** — push current branch to remote                            |
 | `F5` / `P`       | **Pull** — pull from remote                                         |
 | `F6` / `b`       | **Branches** — open branch list / switcher                          |
 | `F7` / `A`       | **Add all & commit** — stage everything and open commit editor      |
 | `n`              | Create a new branch                                                 |
 | `r`              | Reload git status                                                   |
-| `Esc` / `q`      | Exit Git mode                                                       |
+| `Esc` / `q`      | Exit Git mode (or back to Git Repos if entered from there)          |
 
 ### Commit editor (Git Commit mode)
 
