@@ -25,6 +25,9 @@ pub enum MenuAction {
     AddBookmark(PathBuf),
     RemoveBookmark(PathBuf),
     RemoveRecent(PathBuf),
+    RunUserCommand(String),
+    AddUserCommand,
+    RemoveUserCommand(String),
 }
 
 #[derive(Debug, Clone)]

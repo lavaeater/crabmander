@@ -17,6 +17,7 @@ mod git_repos;
 mod last_paths;
 mod recent_dirs;
 mod tui;
+mod user_commands;
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {

@@ -32,6 +32,7 @@
       "<f1>": "QuickCd",
       "<shift-f1>": "RecentDirs",
       "<f2>": "ContextMenu",      "<shift-x>": "ContextMenu",
+      "<shift-f2>": "UserCommands",
       "<f3>": "View",             "<shift-e>": "View",
       "<f4>": "CalcSizes",        "<shift-z>": "CalcSizes",
       "<f5>": "Copy",             "<shift-y>": "Copy",

@@ -23,6 +23,7 @@ use crate::{
     git_repos,
     last_paths,
     recent_dirs,
+    user_commands,
     tui::{Event, Tui},
 };
 
@@ -72,6 +73,7 @@ pub struct App {
     providers: Vec<Box<dyn ContextMenuProvider>>,
     recent_dirs: Vec<std::path::PathBuf>,
     bookmarks: Vec<std::path::PathBuf>,
+    user_commands: Vec<String>,
     /// Active long-running operations: (id, label, done, total).
     ops: Vec<(u64, String, u64, u64)>,
     next_op_id: u64,
@@ -131,6 +133,7 @@ impl App {
             providers: builtin_providers(),
             recent_dirs: recent_dirs::load(&get_data_dir()),
             bookmarks: bookmarks::load(&get_data_dir()),
+            user_commands: user_commands::load(&get_data_dir()),
             ops: Vec::new(),
             next_op_id: 0,
             should_quit: false,
@@ -520,6 +523,11 @@ impl App {
                 Action::CycleSortMode => self.active_panel_mut().cycle_sort_mode(),
                 Action::InvertSort => self.active_panel_mut().invert_sort(),
                 Action::ContextMenu => self.open_context_menu(),
+                Action::UserCommands => self.open_user_commands_menu(),
+                Action::SaveUserCommand(template) => {
+                    user_commands::add(&mut self.user_commands, template);
+                    user_commands::save(&get_data_dir(), &self.user_commands);
+                }
 
                 // Dir size results (from F4) — write to session cache then update panel.
                 Action::DirSizeResult {
@@ -1094,6 +1102,36 @@ impl App {
         self.open_dialog(DialogState::context_menu(title, items));
     }
 
+    fn open_user_commands_menu(&mut self) {
+        let panel_dir = self.active_panel().path.clone();
+        let other_dir = self.get_panel(self.active.other()).path.clone();
+        let active_side = self.active;
+
+        let ctx = if let Some(entry) = self.active_panel().current_entry().filter(|e| e.name != "..") {
+            let entry_path = panel_dir.join(&entry.name);
+            let effective_targets = self.active_panel().effective_targets();
+            Some(MenuCtx { entry_path, panel_dir: panel_dir.clone(), other_dir: other_dir.clone(), active_side, effective_targets, entry: entry.clone() })
+        } else {
+            None
+        };
+
+        let mut items: Vec<MenuItem> = self.user_commands
+            .iter()
+            .map(|template| {
+                let cmd = ctx.as_ref().map(|c| substitute_placeholders(template, c)).unwrap_or_else(|| template.clone());
+                MenuItem::new(template.clone(), MenuAction::RunUserCommand(cmd))
+                    .with_delete(MenuAction::RemoveUserCommand(template.clone()))
+            })
+            .collect();
+
+        items.push(MenuItem::new(
+            "[ Add command… ({file}, {files}, {dir}, {other}) ]",
+            MenuAction::AddUserCommand,
+        ));
+
+        self.open_dialog(DialogState::context_menu("User Commands", items));
+    }
+
     fn open_dialog(&mut self, state: DialogState) {
         self.dialog_prior_mode = self.mode;
         self.dialog = Some(state);
@@ -1316,6 +1354,21 @@ impl App {
             MenuAction::RemoveRecent(path) => {
                 self.recent_dirs.retain(|p| p != &path);
                 recent_dirs::save(&get_data_dir(), &self.recent_dirs);
+            }
+            MenuAction::RunUserCommand(cmd) => {
+                self.pending_command = Some(("sh".into(), vec!["-c".into(), cmd], vec![self.active, self.active.other()]));
+            }
+            MenuAction::AddUserCommand => {
+                self.open_dialog(DialogState::input(
+                    "Add User Command",
+                    "Command template ({file}, {files}, {dir}, {other}):",
+                    String::new(),
+                    Box::new(OpAddUserCommand),
+                ));
+            }
+            MenuAction::RemoveUserCommand(template) => {
+                user_commands::remove(&mut self.user_commands, &template);
+                user_commands::save(&get_data_dir(), &self.user_commands);
             }
             MenuAction::NewBranchInScope { git_root, recursive } => {
                 let submodule_paths = if recursive {
@@ -2278,6 +2331,45 @@ impl DeferredOp for OpOpenInNano {
                 args: vec![path],
                 reload: vec![],
             });
+        }
+    }
+}
+
+/// Shell-quote a path so it survives being embedded in `sh -c "..."`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Substitute `{file}`, `{files}`, `{dir}`, `{other}` placeholders in a command template.
+fn substitute_placeholders(template: &str, ctx: &MenuCtx) -> String {
+    let file = ctx.effective_targets.first()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| ctx.panel_dir.to_string_lossy().into_owned());
+
+    let files = if ctx.effective_targets.is_empty() {
+        shell_quote(&ctx.panel_dir.to_string_lossy())
+    } else {
+        ctx.effective_targets.iter()
+            .map(|p| shell_quote(&p.to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    // Replace {files} before {file} to avoid partial substitution.
+    template
+        .replace("{files}", &files)
+        .replace("{file}", &shell_quote(&file))
+        .replace("{dir}", &shell_quote(&ctx.panel_dir.to_string_lossy()))
+        .replace("{other}", &shell_quote(&ctx.other_dir.to_string_lossy()))
+}
+
+#[derive(Debug)]
+struct OpAddUserCommand;
+impl DeferredOp for OpAddUserCommand {
+    fn execute(self: Box<Self>, ctx: OpCtx) {
+        let template = ctx.input.trim().to_owned();
+        if !template.is_empty() {
+            let _ = ctx.tx.send(Action::SaveUserCommand(template));
         }
     }
 }

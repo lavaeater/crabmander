@@ -239,6 +239,8 @@ pub enum Action {
 
     SelectTheme,  // F11
     RecentDirs,   // Shift-F1
+    UserCommands, // Shift-F2
+    SaveUserCommand(String),
 
     // Global git view (F12 / Shift+G)
     GlobalGitView,
