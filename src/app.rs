@@ -501,6 +501,7 @@ impl App {
                 // F-key operations
                 Action::Copy => self.open_copy_dialog(),
                 Action::Move => self.open_move_dialog(),
+                Action::Rename => self.open_rename_dialog(),
                 Action::Mkdir => self.open_mkdir_dialog(),
                 Action::Delete => self.open_delete_dialog(),
                 Action::View => self.open_nano_dialog(),
@@ -925,6 +926,23 @@ impl App {
             format!("Move {} to:", label),
             dest,
             Box::new(OpMove { sources, active }),
+        ));
+    }
+
+    fn open_rename_dialog(&mut self) {
+        let panel = self.active_panel();
+        let entry = match panel.current_entry().filter(|e| e.name != "..") {
+            Some(e) => e.clone(),
+            None => return,
+        };
+        let src = panel.path.join(&entry.name);
+        let prefill = entry.name.clone();
+        let active = self.active;
+        self.open_dialog(DialogState::input(
+            "Rename",
+            format!("Rename '{}' to:", entry.name),
+            prefill,
+            Box::new(OpMove { sources: vec![src], active }),
         ));
     }
 
@@ -2175,20 +2193,33 @@ impl DeferredOp for OpMove {
         let active = self.active;
         let id = ctx.op_id;
         let total = self.sources.len() as u64;
+        // A bare name (no path separator) means rename in the source's own directory.
+        let rename_in_place = dest.parent().map_or(true, |p| p == std::path::Path::new(""));
         tokio::spawn(async move {
             let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: 0, total });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
             for (i, src) in self.sources.iter().enumerate() {
-                let name = match file_name_of(src) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        errors.push(format!("{}: {}", src.display(), e));
-                        let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
-                        continue;
+                let dest_full = if rename_in_place {
+                    match src.parent() {
+                        Some(parent) => parent.join(&dest),
+                        None => {
+                            errors.push(format!("{}: cannot determine parent directory", src.display()));
+                            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                            continue;
+                        }
                     }
+                } else {
+                    let name = match file_name_of(src) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            errors.push(format!("{}: {}", src.display(), e));
+                            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                            continue;
+                        }
+                    };
+                    dest.join(&name)
                 };
-                let dest_full = dest.join(&name);
                 match tokio::fs::rename(src, &dest_full).await {
                     Ok(()) => succeeded += 1,
                     Err(e) => {

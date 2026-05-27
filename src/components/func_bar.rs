@@ -10,6 +10,7 @@ const NORMAL_KEYS: &[(&str, &str)] = &[
     ("F4/⇧Z", "Sizes"),
     ("F5/⇧Y", "Copy"),
     ("F6/⇧R", "Move"),
+    ("⇧F6", "Rename"),
     ("F7/⇧K", "MkDir"),
     ("F8/⇧D", "Delete"),
     ("F9/⇧S", "Sort"),

@@ -36,6 +36,7 @@
       "<f4>": "CalcSizes",        "<shift-z>": "CalcSizes",
       "<f5>": "Copy",             "<shift-y>": "Copy",
       "<f6>": "Move",             "<shift-r>": "Move",
+      "<shift-f6>": "Rename",
       "<f7>": "Mkdir",            "<shift-k>": "Mkdir",
       "<f8>": "Delete",           "<shift-d>": "Delete",
       "<f9>": "CycleSortMode",    "<shift-s>": "CycleSortMode",

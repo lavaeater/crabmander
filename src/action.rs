@@ -155,6 +155,7 @@ pub enum Action {
     // Operations (triggered by F-keys)
     Copy,
     Move,
+    Rename, // Shift+F6 — rename current file in place
     Mkdir,
     Delete,
     ContextMenu,   // F2
