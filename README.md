@@ -159,14 +159,14 @@ on the active panel. The panel narrows to entries whose names contain the typed
 text (case-insensitive). The active filter is shown in a yellow bar inside the
 panel border.
 
-| Key             | Action                       |
-|-----------------|------------------------------|
-| _printable key_ | Append to filter             |
-| `Esc`           | Clear filter                 |
+| Key             | Action                                          |
+|-----------------|--------------------------------------------------|
+| _printable key_ | Append to filter                                |
+| `Backspace`     | Remove last filter character (while filtering)  |
+| `Esc`           | Clear filter                                    |
 
-`Backspace` is bound to "go to parent directory" (see above) rather than
-editing the filter, so it exits the current directory instead of removing a
-filter character.
+While the filter is empty, `Backspace` falls back to its normal binding
+("go to parent directory", see above).
 
 The filter clears automatically when you navigate into a new directory.
 
