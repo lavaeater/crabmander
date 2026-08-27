@@ -162,8 +162,11 @@ panel border.
 | Key             | Action                       |
 |-----------------|------------------------------|
 | _printable key_ | Append to filter             |
-| `Backspace`     | Remove last filter character |
 | `Esc`           | Clear filter                 |
+
+`Backspace` is bound to "go to parent directory" (see above) rather than
+editing the filter, so it exits the current directory instead of removing a
+filter character.
 
 The filter clears automatically when you navigate into a new directory.
 
