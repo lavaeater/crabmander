@@ -47,14 +47,6 @@ pub struct DiffLine {
     pub segments: Vec<DiffSegment>,
 }
 
-/// One bookmarked git repo with optional metadata loaded from disk.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GitRepoInfo {
-    pub path: PathBuf,
-    pub branch: Option<String>,
-    pub is_dirty: bool,
-}
-
 // --- Git status types ---
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

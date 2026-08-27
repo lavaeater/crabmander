@@ -41,13 +41,11 @@ const CARGO_COMMANDS: &[CargoCommand] = &[
 pub enum Entry {
     /// A `cargo <subcommand> [extra_args]` invocation.
     Cargo { idx: usize },
-    /// Visual separator — not selectable.
-    Separator,
 }
 
 impl Entry {
     fn is_selectable(&self) -> bool {
-        !matches!(self, Entry::Separator)
+        true
     }
 }
 
@@ -105,7 +103,6 @@ impl CargoView {
                     format!("cargo {} {}", c.subcommand, c.extra_args)
                 }
             }
-            Entry::Separator => unreachable!("separator is not selectable"),
         }
     }
 
@@ -140,10 +137,6 @@ impl CargoView {
             .skip(offset)
             .take(list_h)
             .map(|(_, entry)| match entry {
-                Entry::Separator => {
-                    ListItem::new("  ──────────────────────────────────────")
-                        .style(Style::default().add_modifier(Modifier::DIM))
-                }
                 Entry::Cargo { idx } => {
                     let cmd = &CARGO_COMMANDS[*idx];
                     let label = format!("  cargo {}", cmd.label);

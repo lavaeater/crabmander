@@ -791,8 +791,8 @@ impl GitView {
                 for ch in &row.prefix {
                     let style = match ch {
                         GraphChar::Node => palette.git_idx_added.add_modifier(Modifier::BOLD),
-                        GraphChar::Vertical | GraphChar::Horizontal => palette.git_wt_modified,
-                        GraphChar::BranchRight | GraphChar::BranchLeft | GraphChar::Junction => {
+                        GraphChar::Vertical => palette.git_wt_modified,
+                        GraphChar::BranchRight | GraphChar::BranchLeft => {
                             palette.git_wt_untracked
                         }
                         GraphChar::Space => Style::default(),
@@ -1171,15 +1171,14 @@ fn load_commits_blocking(git_root: &std::path::Path, limit: usize) -> Result<Vec
     // Peel annotated tags to their commit target.
     let mut peeled_map: std::collections::HashMap<git2::Oid, Vec<String>> = std::collections::HashMap::new();
     for reference in repo.references()?.flatten() {
-        if reference.is_tag() {
-            if let Ok(obj) = reference.peel(git2::ObjectType::Commit) {
+        if reference.is_tag()
+            && let Ok(obj) = reference.peel(git2::ObjectType::Commit) {
                 let commit_oid = obj.id();
                 let name = reference.shorthand().unwrap_or("").to_owned();
                 if !name.is_empty() {
                     peeled_map.entry(commit_oid).or_default().push(format!("tag: {}", name));
                 }
             }
-        }
     }
     for (oid, decs) in peeled_map {
         let entry = ref_map.entry(oid).or_default();
@@ -1225,10 +1224,8 @@ fn load_commits_blocking(git_root: &std::path::Path, limit: usize) -> Result<Vec
 pub enum GraphChar {
     Node,        // *
     Vertical,    // |
-    Horizontal,  // -  (used inside merge row)
     BranchRight, // \  (going right = older lane)
     BranchLeft,  // /  (going left = merge)
-    Junction,    // +
     Space,       //
 }
 
@@ -1237,10 +1234,8 @@ impl GraphChar {
         match self {
             GraphChar::Node => "*",
             GraphChar::Vertical => "│",
-            GraphChar::Horizontal => "─",
             GraphChar::BranchRight => "\\",
             GraphChar::BranchLeft => "/",
-            GraphChar::Junction => "+",
             GraphChar::Space => " ",
         }
     }
@@ -1374,8 +1369,8 @@ fn apply_word_diff(lines: Vec<DiffLine>) -> Vec<DiffLine> {
 
         if rem_start == add_start || add_start == add_end {
             // Not a paired hunk; emit as-is.
-            for j in rem_start..add_end {
-                result.push(lines[j].clone());
+            for line in &lines[rem_start..add_end] {
+                result.push(line.clone());
             }
             continue;
         }
@@ -1527,7 +1522,7 @@ fn format_date(ts: i64) -> String {
 }
 
 fn is_leap(y: u32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 fn truncate(s: &str, max: usize) -> &str {

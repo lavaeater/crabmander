@@ -1635,24 +1635,22 @@ impl App {
     fn do_git_tab_diff(&mut self) {
         let Some(gv) = &mut self.git_view else { return };
         let path = gv.status_cursor_path();
-        if let Some(p) = path {
-            if gv.diff_path.as_deref() != Some(&p) {
+        if let Some(p) = path
+            && gv.diff_path.as_deref() != Some(&p) {
                 let git_root = gv.git_root.clone();
                 GitView::load_diff(git_root, p, self.action_tx.clone());
             }
-        }
         gv.switch_tab(GitViewTab::Diff);
     }
 
     fn do_git_tab_blame(&mut self) {
         let Some(gv) = &mut self.git_view else { return };
         let path = gv.status_cursor_path();
-        if let Some(p) = path {
-            if gv.blame_path.as_deref() != Some(&p) {
+        if let Some(p) = path
+            && gv.blame_path.as_deref() != Some(&p) {
                 let git_root = gv.git_root.clone();
                 GitView::load_blame(git_root, p, self.action_tx.clone());
             }
-        }
         gv.switch_tab(GitViewTab::Blame);
     }
 
@@ -2247,7 +2245,7 @@ impl DeferredOp for OpMove {
         let id = ctx.op_id;
         let total = self.sources.len() as u64;
         // A bare name (no path separator) means rename in the source's own directory.
-        let rename_in_place = dest.parent().map_or(true, |p| p == std::path::Path::new(""));
+        let rename_in_place = dest.parent().is_none_or(|p| p == std::path::Path::new(""));
         tokio::spawn(async move {
             let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: 0, total });
             let mut errors: Vec<String> = Vec::new();
@@ -2470,21 +2468,19 @@ impl DeferredOp for OpGitCreateBranchRecursive {
                 repo.set_head(&format!("refs/heads/{}", name))?;
                 // Best-effort: create and checkout the same branch in each submodule.
                 for sub_path in &submodule_paths {
-                    if let Ok(sub_repo) = git2::Repository::open(sub_path) {
-                        if let Ok(commit) = sub_repo.head().and_then(|h| h.peel_to_commit()) {
+                    if let Ok(sub_repo) = git2::Repository::open(sub_path)
+                        && let Ok(commit) = sub_repo.head().and_then(|h| h.peel_to_commit()) {
                             let created = sub_repo.branch(&name, &commit, false).is_ok();
                             // If it already existed, just check it out.
                             let branch_exists = created || sub_repo
                                 .find_branch(&name, git2::BranchType::Local)
                                 .is_ok();
-                            if branch_exists {
-                                if let Ok(obj) = sub_repo.revparse_single(&format!("refs/heads/{}", name)) {
+                            if branch_exists
+                                && let Ok(obj) = sub_repo.revparse_single(&format!("refs/heads/{}", name)) {
                                     let _ = sub_repo.checkout_tree(&obj, None);
                                     let _ = sub_repo.set_head(&format!("refs/heads/{}", name));
                                 }
-                            }
                         }
-                    }
                 }
                 Ok::<_, git2::Error>(())
             })
