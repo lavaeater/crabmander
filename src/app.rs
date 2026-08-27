@@ -373,6 +373,14 @@ impl App {
             return Ok(());
         }
 
+        // While a filter is active, Backspace edits the filter rather than
+        // triggering whatever action a config binds it to (e.g. NavParent).
+        if key.code == KeyCode::Backspace && !self.active_panel().filter.is_empty() {
+            self.last_tick_key_events.clear();
+            tx.send(Action::FilterBackspace)?;
+            return Ok(());
+        }
+
         // Normal mode: keybinding lookup first.
         let Some(keymap) = self.config.keybindings.0.get(&self.mode) else {
             return Ok(());
