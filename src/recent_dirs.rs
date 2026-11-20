@@ -112,7 +112,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         save(&dir, &[]);
         let loaded = load(&dir);
-        assert!(loaded.is_empty());
+        assert_eq!(loaded, [] as [std::path::PathBuf; 0]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

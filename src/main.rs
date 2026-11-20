@@ -55,7 +55,7 @@ fn install_desktop_entry() -> color_eyre::Result<()> {
          Keywords=files;manager;tui;\n"
     );
 
-    let dir = dirs_next()?;
+    let dir = dirs_next();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("crabmander.desktop");
     std::fs::File::create(&path)?.write_all(desktop.as_bytes())?;
@@ -71,9 +71,10 @@ fn install_desktop_entry() -> color_eyre::Result<()> {
     Ok(())
 }
 
-fn dirs_next() -> color_eyre::Result<std::path::PathBuf> {
-    let home = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
-    Ok(home.join(".local/share/applications"))
+fn dirs_next() -> std::path::PathBuf {
+    let home = std::env::var("HOME").map_or_else(
+        |_| std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from,
+    );
+    home.join(".local/share/applications")
 }

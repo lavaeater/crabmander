@@ -249,7 +249,7 @@ pub fn collect_removable<'a>(
     parent_model: Option<&'a str>,
 ) {
     let hotplug = node["hotplug"].as_bool().unwrap_or(false)
-        || node["hotplug"].as_str().map(|s| s == "1").unwrap_or(false);
+        || node["hotplug"].as_str().is_some_and(|s| s == "1");
     let kind = node["type"].as_str().unwrap_or("");
     let model = node["model"]
         .as_str()

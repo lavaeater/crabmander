@@ -43,6 +43,7 @@ const CARGO_KEYS: &[(&str, &str)] = &[
     ("^B/Esc", "Exit"),
 ];
 
+#[derive(Clone, Copy)]
 pub enum FuncBarMode {
     Normal,
     GlobalGit,
@@ -68,7 +69,7 @@ pub fn draw(frame: &mut Frame, area: Rect, mode: FuncBarMode, palette: &Palette)
     let mut spans = Vec::new();
     for (key, label) in keys {
         spans.push(Span::styled(*key, key_style));
-        spans.push(Span::raw(format!("{} ", label)));
+        spans.push(Span::raw(format!("{label} ")));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

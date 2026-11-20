@@ -332,10 +332,10 @@ impl Panel {
                 .map(|name| self.path.join(name))
                 .collect()
         } else if let Some(entry) = self.current_entry() {
-            if entry.name != ".." {
-                vec![self.path.join(&entry.name)]
-            } else {
+            if entry.name == ".." {
                 vec![]
+            } else {
+                vec![self.path.join(&entry.name)]
             }
         } else {
             vec![]
@@ -417,12 +417,11 @@ impl Panel {
             let tx = tx.clone();
             let panel_path = panel_path.clone();
             tokio::spawn(async move {
-                let size = recursive_size(&path).await;
                 let _ = tx.send(Action::DirSizeResult {
                     side,
                     panel_path,
                     name,
-                    size,
+                    size: recursive_size(&path).await,
                 });
             });
         }
@@ -441,7 +440,7 @@ impl Panel {
         self.rebuild_view(); // re-sort as each size arrives
     }
 
-    /// Total known size: all files + all computed dir sizes. Returns (total, is_approximate).
+    /// Total known size: all files + all computed dir sizes. Returns (total, `is_approximate`).
     pub fn size_summary(&self) -> Option<(u64, bool)> {
         if !self.sizes_calculating && self.dir_sizes.is_empty() {
             return None;
@@ -466,14 +465,14 @@ impl Panel {
         };
 
         let git_suffix = match &self.git_branch {
-            Some(branch) if self.git_dirty => format!(" [{}*]", branch),
-            Some(branch) => format!(" [{}]", branch),
+            Some(branch) if self.git_dirty => format!(" [{branch}*]"),
+            Some(branch) => format!(" [{branch}]"),
             None => String::new(),
         };
         // 2 border chars + 2 padding spaces + git suffix
         let path_budget = (area.width as usize).saturating_sub(4 + git_suffix.len());
         let condensed = condense_path(&self.path.to_string_lossy(), path_budget);
-        let title = format!(" {}{} ", condensed, git_suffix);
+        let title = format!(" {condensed}{git_suffix} ");
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
@@ -518,17 +517,17 @@ impl Panel {
             "↓"
         };
         let h_name = if self.sort_mode == SortMode::Name {
-            format!("Name{}", arrow)
+            format!("Name{arrow}")
         } else {
             "Name".into()
         };
         let h_size = if self.sort_mode == SortMode::Size {
-            format!("Size{}", arrow)
+            format!("Size{arrow}")
         } else {
             "Size".into()
         };
         let h_mod = if self.sort_mode == SortMode::Modified {
-            format!("Date{}", arrow)
+            format!("Date{arrow}")
         } else {
             "Date".into()
         };
@@ -638,8 +637,7 @@ async fn read_dir_entries(path: &Path) -> color_eyre::Result<Vec<EntryInfo>> {
             .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
 
         #[cfg(unix)]
         let (nlink, owner) = {
@@ -710,54 +708,49 @@ pub async fn delete_recursive(path: &Path) -> color_eyre::Result<()> {
 /// Runs synchronously; call from `tokio::task::spawn_blocking`.
 pub fn extract_archive_sync(archive: &Path, dest: &Path) -> color_eyre::Result<()> {
     use std::fs::File;
+    use std::io::Read;
+
+    /// Returns the name with `ext` stripped if it ends with `ext` (ASCII case-insensitive).
+    fn strip_ext<'a>(name: &'a str, ext: &str) -> Option<&'a str> {
+        let cut = name.len().checked_sub(ext.len())?;
+        (name.is_char_boundary(cut) && name[cut..].eq_ignore_ascii_case(ext)).then(|| &name[..cut])
+    }
+
+    /// Decompress a single-file stream to `dest/<stem>`.
+    fn decompress_to(mut reader: impl Read, dest: &Path, stem: &str) -> color_eyre::Result<()> {
+        let mut out = File::create(dest.join(stem))?;
+        std::io::copy(&mut reader, &mut out)?;
+        Ok(())
+    }
 
     std::fs::create_dir_all(dest)?;
 
-    let name = archive
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
+    // Keep the original casing: it is used for the output name of single-file archives.
+    let name = archive.file_name().unwrap_or_default().to_string_lossy();
+    let has = |ext: &str| strip_ext(&name, ext).is_some();
 
     let file = File::open(archive)?;
 
-    if name.ends_with(".zip") {
-        let mut zip = zip::ZipArchive::new(file)?;
-        zip.extract(dest)?;
-    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        let gz = flate2::read::GzDecoder::new(file);
-        tar::Archive::new(gz).unpack(dest)?;
-    } else if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") {
-        let bz = bzip2::read::BzDecoder::new(file);
-        tar::Archive::new(bz).unpack(dest)?;
-    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
-        let xz = xz2::read::XzDecoder::new(file);
-        tar::Archive::new(xz).unpack(dest)?;
-    } else if name.ends_with(".tar.zst") {
-        let zst = zstd::Decoder::new(file)?;
-        tar::Archive::new(zst).unpack(dest)?;
-    } else if name.ends_with(".tar") {
+    if has(".zip") {
+        zip::ZipArchive::new(file)?.extract(dest)?;
+    } else if has(".tar.gz") || has(".tgz") {
+        tar::Archive::new(flate2::read::GzDecoder::new(file)).unpack(dest)?;
+    } else if has(".tar.bz2") || has(".tbz2") {
+        tar::Archive::new(bzip2::read::BzDecoder::new(file)).unpack(dest)?;
+    } else if has(".tar.xz") || has(".txz") {
+        tar::Archive::new(xz2::read::XzDecoder::new(file)).unpack(dest)?;
+    } else if has(".tar.zst") {
+        tar::Archive::new(zstd::Decoder::new(file)?).unpack(dest)?;
+    } else if has(".tar") {
         tar::Archive::new(file).unpack(dest)?;
-    } else if name.ends_with(".gz") {
-        let stem = name.strip_suffix(".gz").unwrap();
-        let mut gz = flate2::read::GzDecoder::new(file);
-        let mut out = std::fs::File::create(dest.join(stem))?;
-        std::io::copy(&mut gz, &mut out)?;
-    } else if name.ends_with(".bz2") {
-        let stem = name.strip_suffix(".bz2").unwrap();
-        let mut bz = bzip2::read::BzDecoder::new(file);
-        let mut out = std::fs::File::create(dest.join(stem))?;
-        std::io::copy(&mut bz, &mut out)?;
-    } else if name.ends_with(".xz") {
-        let stem = name.strip_suffix(".xz").unwrap();
-        let mut xz = xz2::read::XzDecoder::new(file);
-        let mut out = std::fs::File::create(dest.join(stem))?;
-        std::io::copy(&mut xz, &mut out)?;
-    } else if name.ends_with(".zst") {
-        let stem = name.strip_suffix(".zst").unwrap();
-        let mut zst = zstd::Decoder::new(file)?;
-        let mut out = std::fs::File::create(dest.join(stem))?;
-        std::io::copy(&mut zst, &mut out)?;
+    } else if let Some(stem) = strip_ext(&name, ".gz") {
+        decompress_to(flate2::read::GzDecoder::new(file), dest, stem)?;
+    } else if let Some(stem) = strip_ext(&name, ".bz2") {
+        decompress_to(bzip2::read::BzDecoder::new(file), dest, stem)?;
+    } else if let Some(stem) = strip_ext(&name, ".xz") {
+        decompress_to(xz2::read::XzDecoder::new(file), dest, stem)?;
+    } else if let Some(stem) = strip_ext(&name, ".zst") {
+        decompress_to(zstd::Decoder::new(file)?, dest, stem)?;
     } else {
         return Err(eyre!("Unsupported archive type: {}", name));
     }
@@ -784,9 +777,7 @@ pub fn is_archive(name: &str) -> bool {
 #[cfg(unix)]
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
@@ -806,10 +797,10 @@ fn uid_to_name(uid: u32) -> String {
     let ret = unsafe {
         libc::getpwuid_r(
             uid,
-            &mut pwd,
-            buf.as_mut_ptr() as *mut libc::c_char,
+            &raw mut pwd,
+            buf.as_mut_ptr().cast::<libc::c_char>(),
             buf.len(),
-            &mut result,
+            &raw mut result,
         )
     };
     if ret != 0 || result.is_null() {
@@ -914,21 +905,21 @@ pub(crate) fn format_size(bytes: u64) -> String {
         unit += 1;
     }
     if unit == 0 {
-        format!("{:>7}B", bytes)
+        format!("{bytes:>7}B")
     } else {
         format!("{:>6.1}{}", val, UNITS[unit])
     }
 }
 
 pub(crate) fn format_age(unix_secs: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     if unix_secs == 0 {
         return "         ".into();
     }
-    use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(unix_secs);
+        .map_or(unix_secs, |d| d.as_secs());
     let elapsed = now.saturating_sub(unix_secs);
     if elapsed < 3600 {
         format!("{:>5}m ago", elapsed / 60)
@@ -983,9 +974,8 @@ fn find_cargo_root(start: &Path) -> Option<PathBuf> {
 async fn detect_git_info(start: &Path) -> (Option<String>, bool) {
     let start = start.to_path_buf();
     tokio::task::spawn_blocking(move || {
-        let repo = match git2::Repository::discover(&start) {
-            Ok(r) => r,
-            Err(_) => return (None, false),
+        let Ok(repo) = git2::Repository::discover(&start) else {
+            return (None, false);
         };
         let branch = repo
             .head()
@@ -998,8 +988,7 @@ async fn detect_git_info(start: &Path) -> (Option<String>, bool) {
                     .include_untracked(false)
                     .include_ignored(false),
             ))
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
+            .is_ok_and(|s| !s.is_empty());
         (Some(branch), is_dirty)
     })
     .await
@@ -1031,6 +1020,39 @@ mod tests {
 
     fn dir(name: &str) -> EntryInfo {
         entry(name, true, 0, 1_000_000)
+    }
+
+    // --- Archive extraction ---
+
+    #[test]
+    fn extract_single_file_gz_keeps_original_case() {
+        use std::io::Write;
+        let tmp = std::env::temp_dir().join(format!("crabmander-test-gz-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive = tmp.join("Report.CSV.GZ");
+        let mut gz = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        gz.write_all(b"a,b\n").unwrap();
+        gz.finish().unwrap();
+
+        let dest = tmp.join("out");
+        extract_archive_sync(&archive, &dest).unwrap();
+        let out = std::fs::read_to_string(dest.join("Report.CSV"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert_eq!(out.unwrap(), "a,b\n");
+    }
+
+    #[test]
+    fn extract_rejects_unknown_extension() {
+        let tmp = std::env::temp_dir().join(format!("crabmander-test-unk-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let archive = tmp.join("notes.txt");
+        std::fs::write(&archive, "x").unwrap();
+        let res = extract_archive_sync(&archive, &tmp.join("out"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert!(res.is_err());
     }
 
     /// Build a Panel with `entries` already loaded (no async, no tokio runtime needed).
@@ -1290,7 +1312,7 @@ mod tests {
     fn effective_targets_empty_when_cursor_on_dotdot() {
         let mut p = panel_with(vec![dir(".."), file("a.txt")]);
         p.cursor = 0; // cursor on ".."
-        assert!(p.effective_targets().is_empty());
+        assert_eq!(p.effective_targets(), [] as [std::path::PathBuf; 0]);
     }
 
     #[test]

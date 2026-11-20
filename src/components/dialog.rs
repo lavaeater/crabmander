@@ -210,8 +210,8 @@ pub fn draw(
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(palette.dlg_confirm)
-                .title(format!(" {} ", title));
-            let text = format!("\n{}\n\n[ Yes / Enter ]   [ No / Esc ]", message);
+                .title(format!(" {title} "));
+            let text = format!("\n{message}\n\n[ Yes / Enter ]   [ No / Esc ]");
             let para = Paragraph::new(text)
                 .block(block)
                 .alignment(Alignment::Center)
@@ -230,7 +230,7 @@ pub fn draw(
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(palette.dlg_input)
-                .title(format!(" {} ", title));
+                .title(format!(" {title} "));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
 
@@ -247,7 +247,7 @@ pub fn draw(
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 prompt_area,
             );
-            frame.render_widget(Paragraph::new(format!("{}_", value)), value_area);
+            frame.render_widget(Paragraph::new(format!("{value}_")), value_area);
             frame.render_widget(
                 Paragraph::new("[ Enter ] OK   [ Esc ] Cancel")
                     .alignment(Alignment::Center)
@@ -284,7 +284,7 @@ pub fn draw(
             .areas(inner);
 
             frame.render_widget(
-                Paragraph::new(format!("{}_", input))
+                Paragraph::new(format!("{input}_"))
                     .style(Style::default().add_modifier(Modifier::BOLD)),
                 input_area,
             );
@@ -303,7 +303,7 @@ pub fn draw(
                     } else {
                         palette.entry_dir
                     };
-                    ListItem::new(format!(" {}/", name)).style(style)
+                    ListItem::new(format!(" {name}/")).style(style)
                 })
                 .collect();
 
@@ -327,7 +327,7 @@ pub fn draw(
             selected,
         } => {
             let has_deletable = items.iter().any(|i| i.delete_action.is_some());
-            let hint_height: u16 = if has_deletable { 1 } else { 0 };
+            let hint_height: u16 = u16::from(has_deletable);
             let height = (items.len() as u16 + 4 + hint_height).min(area.height.saturating_sub(2));
             let popup = centered_rect(50, height, area);
             frame.render_widget(Clear, popup);
@@ -335,7 +335,7 @@ pub fn draw(
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(palette.dlg_menu)
-                .title(format!(" {} ", title));
+                .title(format!(" {title} "));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
 
@@ -383,7 +383,7 @@ pub fn draw(
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(palette.dlg_error)
-                .title(format!(" {} ", title));
+                .title(format!(" {title} "));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
 
@@ -394,7 +394,7 @@ pub fn draw(
                 .iter()
                 .skip(*scroll)
                 .take(list_area.height as usize)
-                .map(|msg| ListItem::new(format!(" {}", msg)).style(palette.status_error))
+                .map(|msg| ListItem::new(format!(" {msg}")).style(palette.status_error))
                 .collect();
 
             frame.render_widget(List::new(list_items), list_area);
@@ -405,7 +405,7 @@ pub fn draw(
                 String::new()
             };
             frame.render_widget(
-                Paragraph::new(format!("{}[ Enter / Esc ] Close", scroll_hint))
+                Paragraph::new(format!("{scroll_hint}[ Enter / Esc ] Close"))
                     .alignment(Alignment::Center)
                     .style(Style::default().add_modifier(Modifier::DIM)),
                 hint_area,

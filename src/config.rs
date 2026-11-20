@@ -4,9 +4,9 @@ use std::{collections::HashMap, env, path::PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use directories::ProjectDirs;
-use lazy_static::lazy_static;
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, de::Deserializer};
+use std::sync::LazyLock;
 use tracing::error;
 
 use crate::{action::Action, app::Mode};
@@ -24,7 +24,7 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     #[serde(default, flatten)]
-    pub config: AppConfig,
+    pub app: AppConfig,
     #[serde(default)]
     pub keybindings: KeyBindings,
     #[serde(default)]
@@ -37,7 +37,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            config: AppConfig::default(),
+            app: AppConfig::default(),
             keybindings: KeyBindings::default(),
             styles: Styles::default(),
             theme: default_theme(),
@@ -49,17 +49,18 @@ fn default_theme() -> String {
     "catppuccin-mocha".into()
 }
 
-lazy_static! {
-    pub static ref PROJECT_NAME: String = env!("CARGO_CRATE_NAME").to_uppercase().to_string();
-    pub static ref DATA_FOLDER: Option<PathBuf> =
-        env::var(format!("{}_DATA", PROJECT_NAME.clone()))
-            .ok()
-            .map(PathBuf::from);
-    pub static ref CONFIG_FOLDER: Option<PathBuf> =
-        env::var(format!("{}_CONFIG", PROJECT_NAME.clone()))
-            .ok()
-            .map(PathBuf::from);
-}
+pub static PROJECT_NAME: LazyLock<String> =
+    LazyLock::new(|| env!("CARGO_CRATE_NAME").to_uppercase());
+pub static DATA_FOLDER: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    env::var(format!("{}_DATA", *PROJECT_NAME))
+        .ok()
+        .map(PathBuf::from)
+});
+pub static CONFIG_FOLDER: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    env::var(format!("{}_CONFIG", *PROJECT_NAME))
+        .ok()
+        .map(PathBuf::from)
+});
 
 impl Config {
     pub fn new() -> color_eyre::Result<Self, config::ConfigError> {
@@ -84,7 +85,7 @@ impl Config {
                 .required(false);
             builder = builder.add_source(source);
             if config_dir.join(file).exists() {
-                found_config = true
+                found_config = true;
             }
         }
         if !found_config {
@@ -93,17 +94,17 @@ impl Config {
 
         let mut cfg: Self = builder.build()?.try_deserialize()?;
 
-        for (mode, default_bindings) in default_config.keybindings.0.iter() {
+        for (mode, default_bindings) in &default_config.keybindings.0 {
             let user_bindings = cfg.keybindings.0.entry(*mode).or_default();
-            for (key, cmd) in default_bindings.iter() {
+            for (key, cmd) in default_bindings {
                 user_bindings
                     .entry(key.clone())
                     .or_insert_with(|| cmd.clone());
             }
         }
-        for (mode, default_styles) in default_config.styles.0.iter() {
+        for (mode, default_styles) in &default_config.styles.0 {
             let user_styles = cfg.styles.0.entry(*mode).or_default();
-            for (style_key, style) in default_styles.iter() {
+            for (style_key, style) in default_styles {
                 user_styles.entry(style_key.clone()).or_insert(*style);
             }
         }
@@ -186,7 +187,7 @@ fn extract_modifiers(raw: &str) -> (&str, KeyModifiers) {
                 current = &rest[6..];
             }
             _ => break, // break out of the loop if no known prefix is detected
-        };
+        }
     }
 
     (current, modifiers)
@@ -227,8 +228,7 @@ fn parse_key_code_with_modifiers(
         "f11" => KeyCode::F(11),
         "f12" => KeyCode::F(12),
         "space" => KeyCode::Char(' '),
-        "hyphen" => KeyCode::Char('-'),
-        "minus" => KeyCode::Char('-'),
+        "hyphen" | "minus" => KeyCode::Char('-'),
         "tab" => KeyCode::Tab,
         c if c.len() == 1 => {
             let mut c = c.chars().next().unwrap();
@@ -269,16 +269,16 @@ pub fn key_event_to_string(key_event: &KeyEvent) -> String {
             &char
         }
         KeyCode::Esc => "esc",
-        KeyCode::Null => "",
-        KeyCode::CapsLock => "",
-        KeyCode::Menu => "",
-        KeyCode::ScrollLock => "",
-        KeyCode::Media(_) => "",
-        KeyCode::NumLock => "",
-        KeyCode::PrintScreen => "",
-        KeyCode::Pause => "",
-        KeyCode::KeypadBegin => "",
-        KeyCode::Modifier(_) => "",
+        KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::Menu
+        | KeyCode::ScrollLock
+        | KeyCode::Media(_)
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::KeypadBegin
+        | KeyCode::Modifier(_) => "",
     };
 
     let mut modifiers = Vec::with_capacity(3);
@@ -307,14 +307,14 @@ pub fn key_event_to_string(key_event: &KeyEvent) -> String {
 
 pub fn parse_key_sequence(raw: &str) -> color_eyre::Result<Vec<KeyEvent>, String> {
     if raw.chars().filter(|c| *c == '>').count() != raw.chars().filter(|c| *c == '<').count() {
-        return Err(format!("Unable to parse `{}`", raw));
+        return Err(format!("Unable to parse `{raw}`"));
     }
-    let raw = if !raw.contains("><") {
+    let raw = if raw.contains("><") {
+        raw
+    } else {
         let raw = raw.strip_prefix('<').unwrap_or(raw);
 
         raw.strip_prefix('>').unwrap_or(raw)
-    } else {
-        raw
     };
     let sequences = raw
         .split("><")

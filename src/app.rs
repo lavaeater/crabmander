@@ -1,5 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{prelude::*, widgets::Clear};
+use ratatui::{
+    prelude::*,
+    widgets::{Clear, Paragraph},
+};
 use ratatui_textarea::TextArea;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -55,7 +58,7 @@ pub struct App {
     /// Invalidated on any mutating file operation.
     dir_size_cache: std::collections::HashMap<std::path::PathBuf, u64>,
     /// Command to run after suspending the TUI (set by Execute action).
-    /// Tuple: (cmd, args, sides_to_reload_after).
+    /// Tuple: (cmd, args, `sides_to_reload_after`).
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
     git_view: Option<GitView>,
     cargo_view: Option<CargoView>,
@@ -168,8 +171,8 @@ impl App {
                 println!("\nRunning: {} {}\n", cmd, args.join(" "));
                 std::process::Command::new(&cmd).args(&args).status().ok();
                 println!("\nPress Enter to continue...");
-                let mut _s = String::new();
-                std::io::stdin().read_line(&mut _s).ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
                 tui.enter()?;
                 action_tx.send(Action::ClearScreen)?;
                 for side in reload {
@@ -183,7 +186,7 @@ impl App {
                 action_tx.send(Action::ClearScreen)?;
                 tui.enter()?;
             } else if self.should_quit {
-                tui.stop()?;
+                tui.stop();
                 break;
             }
         }
@@ -214,8 +217,7 @@ impl App {
             let is_qcd = self
                 .dialog
                 .as_ref()
-                .map(|d| d.is_quick_cd())
-                .unwrap_or(false);
+                .is_some_and(super::components::dialog::DialogState::is_quick_cd);
             let is_confirm = matches!(&self.dialog, Some(DialogState::Confirm { .. }));
 
             match key.code {
@@ -393,32 +395,29 @@ impl App {
         let Some(keymap) = self.config.keybindings.0.get(&self.mode) else {
             return Ok(());
         };
-        match keymap.get(&vec![key]) {
-            Some(action) => {
+        if let Some(action) = keymap.get(&vec![key]) {
+            info!("Got action: {action:?}");
+            self.last_tick_key_events.clear();
+            tx.send(action.clone())?;
+        } else {
+            self.last_tick_key_events.push(key);
+            if let Some(action) = keymap.get(&self.last_tick_key_events) {
                 info!("Got action: {action:?}");
                 self.last_tick_key_events.clear();
                 tx.send(action.clone())?;
-            }
-            _ => {
-                self.last_tick_key_events.push(key);
-                if let Some(action) = keymap.get(&self.last_tick_key_events) {
-                    info!("Got action: {action:?}");
-                    self.last_tick_key_events.clear();
-                    tx.send(action.clone())?;
-                } else if self.last_tick_key_events.len() == 1 {
-                    // Unbound single key → filter input or Esc to clear filter.
-                    match key.code {
-                        KeyCode::Char(c)
-                            if !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                        {
-                            tx.send(Action::FilterChar(c))?;
-                        }
-                        KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
-                        KeyCode::Esc => tx.send(Action::FilterClear)?,
-                        _ => {}
+            } else if self.last_tick_key_events.len() == 1 {
+                // Unbound single key → filter input or Esc to clear filter.
+                match key.code {
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        tx.send(Action::FilterChar(c))?;
                     }
+                    KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
+                    KeyCode::Esc => tx.send(Action::FilterClear)?,
+                    _ => {}
                 }
             }
         }
@@ -459,11 +458,11 @@ impl App {
                 Action::NavUp => self.active_panel_mut().nav_up(),
                 Action::NavDown => self.active_panel_mut().nav_down(),
                 Action::NavPageUp => {
-                    let h = self.panel_page_height(tui);
+                    let h = Self::panel_page_height(tui);
                     self.active_panel_mut().nav_page_up(h);
                 }
                 Action::NavPageDown => {
-                    let h = self.panel_page_height(tui);
+                    let h = Self::panel_page_height(tui);
                     self.active_panel_mut().nav_page_down(h);
                 }
                 Action::NavTop => self.active_panel_mut().nav_top(),
@@ -491,7 +490,7 @@ impl App {
                     if let Some(DialogState::QuickCd { input, .. }) = &mut self.dialog {
                         if input.is_empty() && c == '~' {
                             let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                            *input = format!("{}/", home);
+                            *input = format!("{home}/");
                         } else {
                             input.push(c);
                         }
@@ -822,7 +821,7 @@ impl App {
                     }
                 }
 
-                _ => {}
+                Action::Help => {}
             }
         }
         Ok(())
@@ -962,8 +961,8 @@ impl App {
         Panel::load_dir(path, other, self.action_tx.clone());
     }
 
-    fn panel_page_height(&self, tui: &Tui) -> usize {
-        let total = tui.terminal.size().map(|s| s.height).unwrap_or(24);
+    fn panel_page_height(tui: &Tui) -> usize {
+        let total = tui.terminal.size().map_or(24, |s| s.height);
         (total.saturating_sub(5) as usize).max(1)
     }
 
@@ -983,7 +982,7 @@ impl App {
         let active = self.active;
         self.open_dialog(DialogState::input(
             "Copy",
-            format!("Copy {} to:", label),
+            format!("Copy {label} to:"),
             dest,
             Box::new(OpCopy { sources, active }),
         ));
@@ -1003,7 +1002,7 @@ impl App {
         let active = self.active;
         self.open_dialog(DialogState::input(
             "Move",
-            format!("Move {} to:", label),
+            format!("Move {label} to:"),
             dest,
             Box::new(OpMove { sources, active }),
         ));
@@ -1050,8 +1049,7 @@ impl App {
                 "Delete '{}'?",
                 sources[0]
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+                    .map_or_default(|n| n.to_string_lossy().into_owned())
             )
         } else {
             format!("Delete {} items?", sources.len())
@@ -1073,8 +1071,7 @@ impl App {
             .active_panel()
             .current_entry()
             .filter(|e| !e.is_dir && e.name != "..")
-            .map(|e| e.name.clone())
-            .unwrap_or_default();
+            .map_or_default(|e| e.name.clone());
         self.open_dialog(DialogState::input(
             "Open in Nano",
             format!("File in {}:", base.display()),
@@ -1119,7 +1116,7 @@ impl App {
             .into_iter()
             .map(|(id, display)| {
                 let label = if id == current.as_str() {
-                    format!("{} ✓", display)
+                    format!("{display} ✓")
                 } else {
                     display.to_string()
                 };
@@ -1147,7 +1144,7 @@ impl App {
 
         // File-operation items are only added when cursor is on a real entry.
         let entry = self.active_panel().current_entry();
-        let has_file = entry.as_ref().map(|e| e.name != "..").unwrap_or(false);
+        let has_file = entry.as_ref().is_some_and(|e| e.name != "..");
 
         let title = if has_file {
             format!("Actions: {}", entry.as_ref().unwrap().name)
@@ -1206,10 +1203,10 @@ impl App {
             .user_commands
             .iter()
             .map(|template| {
-                let cmd = ctx
-                    .as_ref()
-                    .map(|c| substitute_placeholders(template, c))
-                    .unwrap_or_else(|| template.clone());
+                let cmd = ctx.as_ref().map_or_else(
+                    || template.clone(),
+                    |c| substitute_placeholders(template, c),
+                );
                 MenuItem::new(template.clone(), MenuAction::RunUserCommand(cmd))
                     .with_delete(MenuAction::RemoveUserCommand(template.clone()))
             })
@@ -1382,7 +1379,7 @@ impl App {
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
                     let result = tokio::process::Command::new("udisksctl")
-                        .args(["mount", "-b", &format!("/dev/{}", device)])
+                        .args(["mount", "-b", &format!("/dev/{device}")])
                         .output()
                         .await;
                     match result {
@@ -1411,7 +1408,7 @@ impl App {
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
                     let result = tokio::process::Command::new("udisksctl")
-                        .args(["unmount", "-b", &format!("/dev/{}", device)])
+                        .args(["unmount", "-b", &format!("/dev/{device}")])
                         .output()
                         .await;
                     match result {
@@ -1487,8 +1484,7 @@ impl App {
                 let submodule_paths = if recursive {
                     self.git_view
                         .as_ref()
-                        .map(|gv| gv.all_submodule_paths())
-                        .unwrap_or_default()
+                        .map_or_default(super::components::git_view::GitView::all_submodule_paths)
                 } else {
                     vec![]
                 };
@@ -1756,7 +1752,7 @@ impl App {
     fn enter_global_git_mode(&mut self) {
         let repos = self.git_repos.clone();
         let ggv = GlobalGitView::new(repos.clone());
-        GlobalGitView::load_all_meta(repos, self.action_tx.clone());
+        GlobalGitView::load_all_meta(&repos, &self.action_tx);
         self.global_git_view = Some(ggv);
         self.mode = Mode::GlobalGit;
         self.last_error = None;
@@ -1861,7 +1857,7 @@ impl App {
 
         let root_str = cargo_root.to_string_lossy().into_owned();
         let escaped_root = root_str.replace('\'', "'\\''");
-        let sh_cmd = format!("cd '{}' && {}", escaped_root, shell_cmd);
+        let sh_cmd = format!("cd '{escaped_root}' && {shell_cmd}");
 
         self.mode = Mode::Normal;
         self.cargo_view = None;
@@ -2012,10 +2008,7 @@ impl App {
                         index.write()?;
                         let tree_id = index.write_tree()?;
                         let parent = sub_repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-                        let needs_commit = parent
-                            .as_ref()
-                            .map(|p| p.tree_id() != tree_id)
-                            .unwrap_or(true);
+                        let needs_commit = parent.as_ref().is_none_or(|p| p.tree_id() != tree_id);
                         if needs_commit {
                             let sig = sub_repo.signature()?;
                             let tree = sub_repo.find_tree(tree_id)?;
@@ -2119,7 +2112,7 @@ impl App {
                 });
                 let mut push_opts = git2::PushOptions::new();
                 push_opts.remote_callbacks(callbacks);
-                let branch_refspec = format!("refs/heads/{0}:refs/heads/{0}", branch);
+                let branch_refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
                 let mut refspecs: Vec<String> = vec![branch_refspec];
                 if follow_tags {
                     // Push all annotated tags whose target commits are reachable.
@@ -2180,7 +2173,7 @@ impl App {
                     return Ok(());
                 }
                 if analysis.is_fast_forward() {
-                    let refname = format!("refs/heads/{}", branch);
+                    let refname = format!("refs/heads/{branch}");
                     let mut reference = repo.find_reference(&refname)?;
                     reference.set_target(fetch_commit.id(), "pull: Fast-forward")?;
                     repo.set_head(&refname)?;
@@ -2201,7 +2194,14 @@ impl App {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         self.branch_list.clear();
-        if !gv.submodule_statuses.is_empty() {
+        if gv.submodule_statuses.is_empty() {
+            self.open_dialog(DialogState::input(
+                "New Branch",
+                "Branch name:",
+                String::new(),
+                Box::new(OpGitCreateBranch { git_root }),
+            ));
+        } else {
             self.open_dialog(DialogState::context_menu(
                 "New Branch — Scope",
                 vec![
@@ -2220,13 +2220,6 @@ impl App {
                         },
                     ),
                 ],
-            ));
-        } else {
-            self.open_dialog(DialogState::input(
-                "New Branch",
-                "Branch name:",
-                String::new(),
-                Box::new(OpGitCreateBranch { git_root }),
             ));
         }
     }
@@ -2510,21 +2503,20 @@ impl DeferredOp for OpMove {
             let mut succeeded = 0usize;
             for (i, src) in self.sources.iter().enumerate() {
                 let dest_full = if rename_in_place {
-                    match src.parent() {
-                        Some(parent) => parent.join(&dest),
-                        None => {
-                            errors.push(format!(
-                                "{}: cannot determine parent directory",
-                                src.display()
-                            ));
-                            let _ = tx.send(Action::Progress {
-                                id,
-                                label: "Moving…".into(),
-                                done: (i + 1) as u64,
-                                total,
-                            });
-                            continue;
-                        }
+                    if let Some(parent) = src.parent() {
+                        parent.join(&dest)
+                    } else {
+                        errors.push(format!(
+                            "{}: cannot determine parent directory",
+                            src.display()
+                        ));
+                        let _ = tx.send(Action::Progress {
+                            id,
+                            label: "Moving…".into(),
+                            done: (i + 1) as u64,
+                            total,
+                        });
+                        continue;
                     }
                 } else {
                     let name = match file_name_of(src) {
@@ -2619,11 +2611,10 @@ fn shell_quote(s: &str) -> String {
 
 /// Substitute `{file}`, `{files}`, `{dir}`, `{other}` placeholders in a command template.
 fn substitute_placeholders(template: &str, ctx: &MenuCtx) -> String {
-    let file = ctx
-        .effective_targets
-        .first()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ctx.panel_dir.to_string_lossy().into_owned());
+    let file = ctx.effective_targets.first().map_or_else(
+        || ctx.panel_dir.to_string_lossy().into_owned(),
+        |p| p.to_string_lossy().into_owned(),
+    );
 
     let files = if ctx.effective_targets.is_empty() {
         shell_quote(&ctx.panel_dir.to_string_lossy())
@@ -2717,11 +2708,11 @@ impl DeferredOp for OpGitCreateBranch {
                 let head_commit = repo.head()?.peel_to_commit()?;
                 let mut branch = repo.branch(&name, &head_commit, false)?;
                 if repo.find_remote("origin").is_ok() {
-                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                    let _ = branch.set_upstream(Some(&format!("origin/{name}")));
                 }
-                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                let obj = repo.revparse_single(&format!("refs/heads/{name}"))?;
                 repo.checkout_tree(&obj, None)?;
-                repo.set_head(&format!("refs/heads/{}", name))?;
+                repo.set_head(&format!("refs/heads/{name}"))?;
                 Ok::<_, git2::Error>(())
             })
             .await;
@@ -2755,11 +2746,11 @@ impl DeferredOp for OpGitCreateBranchRecursive {
                 let head_commit = repo.head()?.peel_to_commit()?;
                 let mut branch = repo.branch(&name, &head_commit, false)?;
                 if repo.find_remote("origin").is_ok() {
-                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                    let _ = branch.set_upstream(Some(&format!("origin/{name}")));
                 }
-                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                let obj = repo.revparse_single(&format!("refs/heads/{name}"))?;
                 repo.checkout_tree(&obj, None)?;
-                repo.set_head(&format!("refs/heads/{}", name))?;
+                repo.set_head(&format!("refs/heads/{name}"))?;
                 // Best-effort: create and checkout the same branch in each submodule.
                 for sub_path in &submodule_paths {
                     if let Ok(sub_repo) = git2::Repository::open(sub_path)
@@ -2770,11 +2761,10 @@ impl DeferredOp for OpGitCreateBranchRecursive {
                         let branch_exists =
                             created || sub_repo.find_branch(&name, git2::BranchType::Local).is_ok();
                         if branch_exists
-                            && let Ok(obj) =
-                                sub_repo.revparse_single(&format!("refs/heads/{}", name))
+                            && let Ok(obj) = sub_repo.revparse_single(&format!("refs/heads/{name}"))
                         {
                             let _ = sub_repo.checkout_tree(&obj, None);
-                            let _ = sub_repo.set_head(&format!("refs/heads/{}", name));
+                            let _ = sub_repo.set_head(&format!("refs/heads/{name}"));
                         }
                     }
                 }
@@ -2851,8 +2841,6 @@ fn draw_status_bar(
     error: Option<&str>,
     palette: &Palette,
 ) {
-    use ratatui::widgets::Paragraph;
-
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(palette.status_error), area);
         return;
@@ -2868,10 +2856,10 @@ fn draw_status_bar(
         String::new()
     };
 
-    let filter_text = if !panel.filter.is_empty() {
-        format!(" [filter: {}]", panel.filter)
-    } else {
+    let filter_text = if panel.filter.is_empty() {
         String::new()
+    } else {
+        format!(" [filter: {}]", panel.filter)
     };
 
     let right_text = if let Some((count, size)) = panel.marked_summary() {
@@ -2888,7 +2876,7 @@ fn draw_status_bar(
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_w)]).areas(area);
 
     frame.render_widget(
-        Paragraph::new(format!("{}{}", left_text, filter_text)).style(palette.status_normal),
+        Paragraph::new(format!("{left_text}{filter_text}")).style(palette.status_normal),
         left_area,
     );
     frame.render_widget(
@@ -2906,8 +2894,6 @@ fn draw_git_status_bar(
     error: Option<&str>,
     palette: &Palette,
 ) {
-    use ratatui::widgets::Paragraph;
-
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(palette.status_error), area);
         return;
@@ -2933,7 +2919,7 @@ fn draw_git_status_bar(
 fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     git2::Repository::discover(start)
         .ok()
-        .and_then(|r| r.workdir().map(|p| p.to_path_buf()))
+        .and_then(|r| r.workdir().map(std::path::Path::to_path_buf))
 }
 
 fn git2_cred_callback(
@@ -3040,7 +3026,6 @@ fn draw_branch_popup(
         width: inner.width,
         height: 1,
     };
-    use ratatui::widgets::Paragraph;
     frame.render_widget(
         Paragraph::new("  > current  [local] local branch  [remote] remote-only")
             .style(Style::default().add_modifier(Modifier::DIM)),
@@ -3074,7 +3059,6 @@ fn draw_tag_popup(
     frame.render_widget(block, popup);
 
     if tags.is_empty() {
-        use ratatui::widgets::Paragraph;
         frame.render_widget(
             Paragraph::new("  No tags in this repository.")
                 .style(Style::default().add_modifier(Modifier::DIM)),
@@ -3102,14 +3086,10 @@ fn draw_tag_popup(
             } else {
                 "lightweight"
             };
-            let msg_hint = t
-                .message
-                .as_deref()
-                .map(|m| {
-                    let short: String = m.chars().take(30).collect();
-                    format!("  {}", short)
-                })
-                .unwrap_or_default();
+            let msg_hint = t.message.as_deref().map_or_default(|m| {
+                let short: String = m.chars().take(30).collect();
+                format!("  {short}")
+            });
             let label = format!(" [{}] {}  {}{}", kind, t.target_id, t.name, msg_hint);
             let style = if i == cursor {
                 Style::default().add_modifier(Modifier::REVERSED)
@@ -3126,7 +3106,6 @@ fn draw_tag_popup(
         width: inner.width,
         height: 1,
     };
-    use ratatui::widgets::Paragraph;
     frame.render_widget(
         Paragraph::new("  [annotated] has message  [lightweight] points directly to commit")
             .style(Style::default().add_modifier(Modifier::DIM)),
@@ -3148,13 +3127,12 @@ fn draw_ops_overlay(
 ) {
     use ratatui::widgets::{Block, Borders, Paragraph};
 
-    let n = ops.len() as u16;
-    if n == 0 {
+    if ops.is_empty() {
         return;
     }
 
     let width = 44u16.min(area.width);
-    let height = n + 2;
+    let height = ops.len() as u16 + 2;
     let x = area.x + area.width.saturating_sub(width);
     let y = area.y + area.height.saturating_sub(height);
     let popup = Rect::new(x, y, width, height);
@@ -3170,16 +3148,15 @@ fn draw_ops_overlay(
     for (i, (_, label, done, total)) in ops.iter().enumerate() {
         let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
         let text = if *total == 0 {
-            label.to_string()
+            label.clone()
         } else {
-            let t = (*total).max(1);
-            let d = *done;
+            let total = (*total).max(1);
             let bar_w = inner.width.saturating_sub(label.len() as u16 + 7) as usize;
-            let filled = (bar_w as u64 * d / t) as usize;
+            let filled = (bar_w as u64 * done / total) as usize;
             let empty = bar_w.saturating_sub(filled);
             format!(
                 "{label} {:>3}% {}{}",
-                d * 100 / t,
+                done * 100 / total,
                 "█".repeat(filled),
                 "░".repeat(empty)
             )
@@ -3206,6 +3183,9 @@ fn start_git_watcher(
     use std::sync::mpsc as std_mpsc;
     use std::time::{Duration, Instant};
 
+    // Debounce: wait until 200 ms of silence before firing GitReload.
+    const DEBOUNCE: Duration = Duration::from_millis(200);
+
     let token = tokio_util::sync::CancellationToken::new();
     let token_clone = token.clone();
 
@@ -3216,10 +3196,8 @@ fn start_git_watcher(
         };
         if watcher.watch(&git_root, RecursiveMode::Recursive).is_err() {
             return;
-        };
+        }
 
-        // Debounce: wait until 200 ms of silence before firing GitReload.
-        const DEBOUNCE: Duration = Duration::from_millis(200);
         let mut pending: Option<Instant> = None;
 
         loop {
@@ -3292,7 +3270,7 @@ impl App {
         };
         let name = matches.get(*selected)?;
         // Replace the filter part (after last `/`) with `name/`
-        let prefix_len = input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        let prefix_len = input.rfind('/').map_or(0, |i| i + 1);
         Some(format!("{}{}/", &input[..prefix_len], name))
     }
 }
@@ -3319,8 +3297,8 @@ fn quick_cd_list_dirs(parent: &std::path::Path, filter: &str) -> Vec<String> {
         .ok()
         .into_iter()
         .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| filter.is_empty() || name.to_lowercase().contains(&filter_lower))
         .collect();
@@ -3334,10 +3312,7 @@ fn quick_cd_destination(
     selected: usize,
     base: &std::path::Path,
 ) -> std::path::PathBuf {
-    if !matches.is_empty() {
-        let (parent, _) = quick_cd_parse_input(input, base);
-        parent.join(&matches[selected.min(matches.len() - 1)])
-    } else {
+    if matches.is_empty() {
         // No matches — try to navigate to the raw input.
         let expanded = quick_cd_expand(input);
         if expanded.starts_with('/') {
@@ -3345,13 +3320,16 @@ fn quick_cd_destination(
         } else {
             base.join(expanded)
         }
+    } else {
+        let (parent, _) = quick_cd_parse_input(input, base);
+        parent.join(&matches[selected.min(matches.len() - 1)])
     }
 }
 
 fn quick_cd_expand(s: &str) -> String {
     if let Some(stripped) = s.strip_prefix('~') {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-        format!("{}{}", home, stripped)
+        format!("{home}{stripped}")
     } else {
         s.to_string()
     }
@@ -3368,7 +3346,7 @@ fn format_status_size(bytes: u64) -> String {
         unit += 1;
     }
     if unit == 0 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else {
         format!("{:.1} {}", val, UNITS[unit])
     }
@@ -3378,8 +3356,7 @@ fn target_label(sources: &[std::path::PathBuf]) -> String {
     if sources.len() == 1 {
         sources[0]
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .map_or_default(|n| n.to_string_lossy().into_owned())
     } else {
         format!("{} files", sources.len())
     }

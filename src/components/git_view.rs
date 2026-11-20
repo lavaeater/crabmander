@@ -274,22 +274,21 @@ impl GitView {
                     let mut lines: Vec<GitBlameLine> = Vec::new();
                     for hunk in blame.iter() {
                         let commit_id = hunk.orig_commit_id();
-                        let commit_short = format!("{:.7}", commit_id);
+                        let commit_short = format!("{commit_id:.7}");
                         let sig = hunk.orig_signature();
                         let author_name = sig
                             .as_ref()
                             .and_then(|s| s.name().ok())
                             .unwrap_or("?")
                             .to_owned();
-                        let timestamp = sig.as_ref().map(|s| s.when().seconds()).unwrap_or(0);
+                        let timestamp = sig.as_ref().map_or(0, |s| s.when().seconds());
                         let start = hunk.final_start_line().saturating_sub(1);
                         let count = hunk.lines_in_hunk();
                         for i in 0..count {
                             let line_no = start + i + 1;
                             let content = file_lines
                                 .get(start + i)
-                                .map(|s| s.to_string())
-                                .unwrap_or_default();
+                                .map_or_default(std::string::ToString::to_string);
                             lines.push(GitBlameLine {
                                 line_no,
                                 content,
@@ -346,7 +345,7 @@ impl GitView {
                         true
                     })?;
                     // Apply word-level diff to adjacent +/- lines
-                    let diff_lines = apply_word_diff(diff_lines);
+                    let diff_lines = apply_word_diff(&diff_lines);
                     Ok::<_, git2::Error>(diff_lines)
                 }
             })
@@ -369,7 +368,7 @@ impl GitView {
 
     pub fn on_commits_loaded(&mut self, commits: Vec<GitCommit>) {
         self.graph_rows = build_graph(&commits);
-        self.graph_commits = commits.clone();
+        self.graph_commits.clone_from(&commits);
         self.log_commits = commits;
         self.log_cursor = 0;
         self.log_offset = 0;
@@ -524,8 +523,7 @@ impl GitView {
         }
         self.worktree_entries()
             .get(self.left_cursor)
-            .map(|e| vec![e.path.clone()])
-            .unwrap_or_default()
+            .map_or_default(|e| vec![e.path.clone()])
     }
 
     /// Paths to unstage: marks if any, else cursor entry.
@@ -535,8 +533,7 @@ impl GitView {
         }
         self.staging_entries()
             .get(self.right_cursor)
-            .map(|e| vec![e.path.clone()])
-            .unwrap_or_default()
+            .map_or_default(|e| vec![e.path.clone()])
     }
 
     pub fn has_staged(&self) -> bool {
@@ -683,7 +680,9 @@ impl GitView {
                         continue;
                     }
                     // Strip the remote prefix (e.g. "origin/") to get the short name.
-                    let short = full_name.split_once('/').map(|x| x.1).unwrap_or(&full_name);
+                    let short = full_name
+                        .split_once('/')
+                        .map_or(full_name.as_str(), |x| x.1);
                     if local_names.contains(short) {
                         continue;
                     }
@@ -758,7 +757,7 @@ impl GitView {
             } else {
                 Style::default().add_modifier(Modifier::DIM)
             };
-            spans.push(Span::styled(format!(" {} ", label), style));
+            spans.push(Span::styled(format!(" {label} "), style));
             spans.push(Span::raw(" "));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -919,8 +918,8 @@ impl GitView {
                 let ts = format_timestamp(e.timestamp);
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", e.new_id), palette.git_idx_added),
-                    Span::styled(format!("HEAD@{{{:3}}} ", idx), palette.git_wt_untracked),
-                    Span::styled(format!("{} ", ts), palette.git_wt_modified),
+                    Span::styled(format!("HEAD@{{{idx:3}}} "), palette.git_wt_untracked),
+                    Span::styled(format!("{ts} "), palette.git_wt_modified),
                     Span::raw(&e.message),
                 ]);
                 let style = if is_cursor {
@@ -937,7 +936,7 @@ impl GitView {
 
     fn draw_diff(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let title = match &self.diff_path {
-            Some(p) => format!(" Diff — {} ", p),
+            Some(p) => format!(" Diff — {p} "),
             None => " Diff ".into(),
         };
         let block = Block::default()
@@ -1000,7 +999,7 @@ impl GitView {
 
     fn draw_blame(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let title = match &self.blame_path {
-            Some(p) => format!(" Blame — {} ", p),
+            Some(p) => format!(" Blame — {p} "),
             None => " Blame ".into(),
         };
         let block = Block::default()
@@ -1045,7 +1044,7 @@ impl GitView {
                         format!("{:<14} ", truncate(&bl.author, 14)),
                         palette.git_wt_modified,
                     ),
-                    Span::styled(format!("{} ", date), palette.git_wt_untracked),
+                    Span::styled(format!("{date} "), palette.git_wt_untracked),
                     Span::styled(
                         format!("{:>5} ", bl.line_no),
                         Style::default().add_modifier(Modifier::DIM),
@@ -1125,18 +1124,14 @@ impl GitView {
 
                 let (label, base_style) = if let Some(sub) = submodule_statuses.get(path.as_str()) {
                     let badge = submodule_badge(sub);
-                    let branch_hint = sub
-                        .branch
-                        .as_deref()
-                        .map(|b| format!("  ({})", b))
-                        .unwrap_or_default();
+                    let branch_hint = sub.branch.as_deref().map_or_default(|b| format!("  ({b})"));
                     (
-                        format!(" {} ◆ {}  {}{}", mark, path, badge, branch_hint),
+                        format!(" {mark} ◆ {path}  {badge}{branch_hint}"),
                         palette.git_wt_modified,
                     )
                 } else {
                     let (ch, style) = worktree_status_display(wt.as_ref().unwrap(), palette);
-                    (format!(" {} {} {}", mark, ch, path), style)
+                    (format!(" {mark} {ch} {path}"), style)
                 };
 
                 let base = if is_marked {
@@ -1204,7 +1199,7 @@ impl GitView {
                 let is_marked = self.right_marked.contains(path);
                 let (ch, base_style) = index_status_display(idx.as_ref().unwrap(), palette);
                 let mark = if is_marked { "*" } else { " " };
-                let label = format!(" {} {} {}", mark, ch, path);
+                let label = format!(" {mark} {ch} {path}");
                 let base = if is_marked {
                     palette.entry_marked
                 } else {
@@ -1258,14 +1253,14 @@ fn load_commits_blocking(
         let decoration = if reference.is_branch() {
             let is_head = head_id == Some(oid) && head_branch.as_deref() == Some(&name);
             if is_head {
-                format!("HEAD -> {}", name)
+                format!("HEAD -> {name}")
             } else {
                 name
             }
         } else if reference.is_remote() {
             name
         } else if reference.is_tag() {
-            format!("tag: {}", name)
+            format!("tag: {name}")
         } else {
             name
         };
@@ -1285,7 +1280,7 @@ fn load_commits_blocking(
                 peeled_map
                     .entry(commit_oid)
                     .or_default()
-                    .push(format!("tag: {}", name));
+                    .push(format!("tag: {name}"));
             }
         }
     }
@@ -1306,7 +1301,7 @@ fn load_commits_blocking(
     let mut commits = Vec::with_capacity(limit.min(256));
     for oid in revwalk.flatten().take(limit) {
         let commit = repo.find_commit(oid)?;
-        let id_short = format!("{:.7}", oid);
+        let id_short = format!("{oid:.7}");
         let summary = commit.summary().ok().flatten().unwrap_or("").to_owned();
         let author = commit.author().name().unwrap_or("?").to_owned();
         let timestamp = commit.time().seconds();
@@ -1369,10 +1364,13 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
             .position(|l| l.as_deref() == Some(&commit.id))
             .unwrap_or_else(|| {
                 // New head — find an empty lane or push one.
-                lanes.iter().position(|l| l.is_none()).unwrap_or_else(|| {
-                    lanes.push(None);
-                    lanes.len() - 1
-                })
+                lanes
+                    .iter()
+                    .position(std::option::Option::is_none)
+                    .unwrap_or_else(|| {
+                        lanes.push(None);
+                        lanes.len() - 1
+                    })
             });
 
         // Set up parents: first parent inherits the lane, extras get new lanes.
@@ -1389,7 +1387,7 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
             } else {
                 let slot = new_lanes
                     .iter()
-                    .position(|l| l.is_none())
+                    .position(std::option::Option::is_none)
                     .unwrap_or_else(|| {
                         new_lanes.push(None);
                         new_lanes.len() - 1
@@ -1467,7 +1465,7 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
 // ---------------------------------------------------------------------------
 
 /// Split adjacent removed/added line pairs into word-level segments.
-fn apply_word_diff(lines: Vec<DiffLine>) -> Vec<DiffLine> {
+fn apply_word_diff(lines: &[DiffLine]) -> Vec<DiffLine> {
     let mut result: Vec<DiffLine> = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
@@ -1551,14 +1549,14 @@ fn tokenize_words(s: &str) -> Vec<&str> {
     let mut tokens: Vec<&str> = Vec::new();
     let mut start = 0;
     let mut in_word = false;
-    for (i, c) in s.char_indices() {
-        let is_word = c.is_alphanumeric() || c == '_';
-        if is_word != in_word {
-            if i > start {
-                tokens.push(&s[start..i]);
+    for (pos, c) in s.char_indices() {
+        let word_char = c.is_alphanumeric() || c == '_';
+        if word_char != in_word {
+            if pos > start {
+                tokens.push(&s[start..pos]);
             }
-            start = i;
-            in_word = is_word;
+            start = pos;
+            in_word = word_char;
         }
     }
     if start < s.len() {
@@ -1567,6 +1565,8 @@ fn tokenize_words(s: &str) -> Vec<&str> {
     tokens
 }
 
+// Single-letter names follow the textbook LCS formulation (a/b inputs, n/m lengths, i/j indices).
+#[allow(clippy::many_single_char_names, clippy::similar_names)]
 fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(usize, usize)> {
     let n = a.len();
     let m = b.len();
@@ -1605,7 +1605,8 @@ fn format_timestamp(ts: i64) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
-        .as_secs() as i64;
+        .as_secs();
+    let now = i64::try_from(now).unwrap_or(i64::MAX);
     let delta = now - ts;
     if delta < 60 {
         return "just now".into();
@@ -1624,7 +1625,8 @@ fn format_timestamp(ts: i64) -> String {
 
 fn format_date(ts: i64) -> String {
     // Simple ISO-like date without chrono: YYYY-MM-DD
-    let secs = ts as u64;
+    // Pre-1970 timestamps are clamped to the epoch.
+    let secs = u64::try_from(ts).unwrap_or(0);
     // Days since Unix epoch
     let days = secs / 86400;
     let mut y = 1970u32;
@@ -1676,9 +1678,8 @@ fn collect_submodule_statuses(
     repo: &git2::Repository,
     git_root: &std::path::Path,
 ) -> Vec<SubmoduleInfo> {
-    let subs = match repo.submodules() {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    let Ok(subs) = repo.submodules() else {
+        return Vec::new();
     };
     subs.into_iter()
         .filter_map(|sub| {
@@ -1697,7 +1698,7 @@ fn collect_submodule_statuses(
             let mut staged = 0usize;
             let mut wt_modified = 0usize;
             let mut wt_untracked = 0usize;
-            for e in statuses.iter() {
+            for e in &statuses {
                 let s = e.status();
                 if s.intersects(
                     git2::Status::INDEX_NEW

@@ -92,8 +92,10 @@ pub enum Entry {
 }
 
 impl Entry {
-    fn is_selectable(&self) -> bool {
-        true
+    const fn is_selectable(&self) -> bool {
+        match self {
+            Entry::Cargo { .. } => true,
+        }
     }
 }
 
