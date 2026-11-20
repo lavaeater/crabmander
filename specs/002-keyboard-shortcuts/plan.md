@@ -1,6 +1,6 @@
 # Implementation Plan: Keyboard Shortcut Overhaul
 
-**Branch**: `speccy` (spec dir `002-keyboard-shortcuts`) | **Date**: 2026-11-20 | **Spec**: [spec.md](spec.md)
+**Branch**: `002-keyboard-shortcuts` | **Date**: 2026-11-20 | **Spec**: [spec.md](spec.md)
 
 **Input**: Feature specification from `specs/002-keyboard-shortcuts/spec.md`
 

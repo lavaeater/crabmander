@@ -99,7 +99,7 @@ Findings from reading the current code (`src/app.rs`, `src/config.rs`, `src/tui.
 
 ## R7: Printable keys while the Normal-mode filter is active (FR-013)
 
-- **Decision**: When the active panel's filter is non-empty, unmodified printable characters
+- **Decision** (confirmed by the user, 2026-11-20): When the active panel's filter is non-empty, unmodified printable characters
   (and Shift+letter) go to the filter even if bound (e.g. `j`, `q`, `?`). When the filter is empty,
   bound printable keys run their action and unbound ones start the filter (today's behaviour).
 - **Rationale**: Extends the existing special case for Backspace. Lets a user type any filename once
