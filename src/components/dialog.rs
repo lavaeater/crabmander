@@ -189,10 +189,6 @@ impl DialogState {
             _ => {}
         }
     }
-
-    pub fn is_quick_cd(&self) -> bool {
-        matches!(self, Self::QuickCd { .. })
-    }
 }
 
 // --- Rendering ---
@@ -650,26 +646,5 @@ mod tests {
         if let DialogState::ErrorList { scroll, .. } = &d {
             assert_eq!(*scroll, 0);
         }
-    }
-
-    // --- is_quick_cd ---
-
-    #[test]
-    fn is_quick_cd_true_for_quick_cd_variant() {
-        let d = DialogState::QuickCd {
-            input: String::new(),
-            matches: vec![],
-            selected: 0,
-            base_path: "/tmp".into(),
-        };
-        assert!(d.is_quick_cd());
-    }
-
-    #[test]
-    fn is_quick_cd_false_for_other_variants() {
-        assert!(!DialogState::confirm("T", "m", dummy_op()).is_quick_cd());
-        assert!(!DialogState::input("T", "p", "v", dummy_op()).is_quick_cd());
-        assert!(!DialogState::context_menu("M", vec![]).is_quick_cd());
-        assert!(!DialogState::error_list("E", vec![]).is_quick_cd());
     }
 }

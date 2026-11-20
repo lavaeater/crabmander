@@ -25,7 +25,9 @@ Expected: all pass; the "defaults have no problems" test covers FR-006.
 2. Without touching any F-key, use `Alt+1` … `Alt+0`, `Alt+Minus`, `Alt+=`, and
    `Alt+Shift+1/2/6/9`. Each must do what the matching F-key does (contract defaults table).
 3. In Git mode (`Ctrl+G` inside a repo) use `Alt+1` … `Alt+7`.
-4. Type `Y` in Normal mode: the filter starts with `Y` (no copy dialog).
+4. Repeat 2 and 3 with the leader: `Ctrl+F 5` copies, `Ctrl+F s 6` renames, `Ctrl+F =` opens Git
+   repos. These must work in Tilix too.
+5. Type `Y` in Normal mode: the filter starts with `Y` (no copy dialog).
 
 ## 3. Rebinding and removal (Story 2)
 

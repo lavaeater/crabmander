@@ -1,3 +1,8 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -21,13 +26,32 @@ use crate::{
         panel::{Panel, copy_recursive, delete_recursive, extract_archive_sync, file_name_of},
     },
     config::{Config, get_data_dir},
-    git_repos, last_paths,
+    git_repos,
+    keymap::{self, KeyContext, Lookup},
+    last_paths,
     ops::{DeferredOp, OpCtx},
     palette::Palette,
     recent_dirs,
     tui::{Event, Tui},
     user_commands,
 };
+
+/// How long to wait for the next key of a multi-key sequence.
+const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// A character key without Ctrl/Alt: text in text-input contexts.
+fn is_printable(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(_))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// While the panel filter has text, typed characters extend it even if they are bound (so `j`,
+/// `q` or `?` can be part of a file name). Ctrl/Alt keys still run their bindings.
+fn filter_claims(filter_active: bool, key: &KeyEvent) -> bool {
+    filter_active && is_printable(key)
+}
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
@@ -81,7 +105,9 @@ pub struct App {
     next_op_id: u64,
     should_quit: bool,
     should_suspend: bool,
-    last_tick_key_events: Vec<KeyEvent>,
+    /// Keys of an unfinished multi-key sequence (e.g. after the Ctrl+F leader), normalized.
+    pending_keys: Vec<KeyEvent>,
+    pending_since: Option<Instant>,
     action_tx: mpsc::UnboundedSender<Action>,
     action_rx: mpsc::UnboundedReceiver<Action>,
 }
@@ -145,7 +171,8 @@ impl App {
             next_op_id: 0,
             should_quit: false,
             should_suspend: false,
-            last_tick_key_events: Vec::new(),
+            pending_keys: Vec::new(),
+            pending_since: None,
             action_tx,
             action_rx,
         })
@@ -210,215 +237,90 @@ impl App {
         Ok(())
     }
 
-    fn handle_key_event(&mut self, key: KeyEvent) -> color_eyre::Result<()> {
+    fn handle_key_event(&mut self, raw_key: KeyEvent) -> color_eyre::Result<()> {
         let tx = self.action_tx.clone();
+        let key = keymap::normalize(raw_key);
 
-        if self.mode == Mode::Dialog {
-            let is_qcd = self
-                .dialog
-                .as_ref()
-                .is_some_and(super::components::dialog::DialogState::is_quick_cd);
-            let is_confirm = matches!(&self.dialog, Some(DialogState::Confirm { .. }));
+        // Ctrl+C always quits, whatever the config says (FR-010).
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            self.pending_keys.clear();
+            tx.send(Action::Quit)?;
+            return Ok(());
+        }
 
-            match key.code {
-                KeyCode::Enter => tx.send(Action::DialogConfirm)?,
-                KeyCode::Esc => tx.send(Action::DialogCancel)?,
-                KeyCode::Up => tx.send(Action::DialogNavUp)?,
-                KeyCode::Down => tx.send(Action::DialogNavDown)?,
-                KeyCode::Delete if !is_qcd => tx.send(Action::DialogDeleteSelected)?,
+        let chain = KeyContext::chain(self.mode, self.dialog.as_ref());
 
-                // QuickCd-specific
-                KeyCode::Tab if is_qcd => tx.send(Action::QuickCdComplete)?,
-                KeyCode::Backspace if is_qcd => tx.send(Action::QuickCdBackspace)?,
-                KeyCode::Char(c)
-                    if is_qcd
-                        && !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    tx.send(Action::QuickCdChar(c))?;
-                }
-
-                // Confirm-dialog y/n shortcuts
-                KeyCode::Char('y' | 'Y') if is_confirm => {
-                    tx.send(Action::DialogConfirm)?;
-                }
-                KeyCode::Char('n' | 'N') if is_confirm => {
-                    tx.send(Action::DialogCancel)?;
-                }
-
-                // Input dialogs
-                KeyCode::Backspace => tx.send(Action::DialogInputBackspace)?,
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    tx.send(Action::DialogInputChar(c))?;
-                }
-                _ => {}
+        if self.pending_keys.is_empty() {
+            // In text-input contexts, typed characters are text even if bound (FR-013).
+            if chain[0].is_text_input() && is_printable(&key) {
+                return self.key_fallthrough(chain, raw_key);
             }
-            return Ok(());
-        }
-
-        if self.mode == Mode::GitCommit {
-            match key.code {
-                KeyCode::Esc => tx.send(Action::GitCommitCancel)?,
-                KeyCode::Enter
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        || key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    tx.send(Action::GitCommitSubmit)?;
-                }
-                _ => {
-                    if let Some(ta) = &mut self.commit_textarea {
-                        ta.input(key);
-                    }
-                }
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::GitBranch {
-            match key.code {
-                KeyCode::Esc => tx.send(Action::ExitGitMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitBranchNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitBranchNavDown)?,
-                KeyCode::Enter => tx.send(Action::GitBranchConfirm)?,
-                KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::GitTag {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitTagNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitTagNavDown)?,
-                KeyCode::Enter => tx.send(Action::GitTagConfirm)?,
-                KeyCode::Char('d') => tx.send(Action::GitTagDelete)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::Git {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitNavDown)?,
-                KeyCode::Tab => tx.send(Action::GitSwitchPane)?,
-                KeyCode::Char(' ') | KeyCode::Insert => tx.send(Action::GitToggleMark)?,
-                KeyCode::F(1) | KeyCode::Char('a') => tx.send(Action::GitStage)?,
-                KeyCode::F(2) | KeyCode::Char('u') => tx.send(Action::GitUnstage)?,
-                KeyCode::F(3) | KeyCode::Char('c') => tx.send(Action::GitCommit)?,
-                KeyCode::F(4) | KeyCode::Char('p') => tx.send(Action::GitPush)?,
-                KeyCode::F(5) | KeyCode::Char('P') => tx.send(Action::GitPull)?,
-                KeyCode::F(6) | KeyCode::Char('b') => tx.send(Action::GitListBranches)?,
-                KeyCode::F(7) | KeyCode::Char('A') => tx.send(Action::GitAddAllAndCommit)?,
-                KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
-                KeyCode::Char('r') => tx.send(Action::GitReload)?,
-                KeyCode::Char('t') => tx.send(Action::GitCreateTag)?,
-                KeyCode::Char('T') => tx.send(Action::GitListTags)?,
-                KeyCode::Char('S') => tx.send(Action::GitSuperCommit)?,
-                // Tab switching
-                KeyCode::Char('s') => tx.send(Action::GitTabStatus)?,
-                KeyCode::Char('l') => tx.send(Action::GitTabLog)?,
-                KeyCode::Char('g') => tx.send(Action::GitTabGraph)?,
-                KeyCode::Char('R') => tx.send(Action::GitTabReflog)?,
-                KeyCode::Char('d') => tx.send(Action::GitTabDiff)?,
-                KeyCode::Char('B') => tx.send(Action::GitTabBlame)?,
-                KeyCode::PageUp => {
-                    if let Some(gv) = &mut self.git_view {
-                        gv.tab_page_up(10);
-                    }
-                }
-                KeyCode::PageDown => {
-                    if let Some(gv) = &mut self.git_view {
-                        gv.tab_page_down(10);
-                    }
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::GlobalGit {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGlobalGitView)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GlobalGitNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GlobalGitNavDown)?,
-                KeyCode::Enter => tx.send(Action::GlobalGitSelect)?,
-                KeyCode::Char('d') | KeyCode::Delete => tx.send(Action::GlobalGitRemove)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::Cargo {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitCargoMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::CargoNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::CargoNavDown)?,
-                KeyCode::Enter => tx.send(Action::CargoRunSelected)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        // Ctrl+B enters cargo mode when the active panel is inside a Rust project.
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('b') {
-            if self.active_panel().cargo_root.is_some() {
-                tx.send(Action::EnterCargoMode)?;
-            }
-            return Ok(());
-        }
-
-        // Ctrl+G enters git mode and bookmarks the repo.
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('g') {
-            if self.active_panel().git_branch.is_some() {
-                tx.send(Action::EnterGitMode)?;
-            }
-            return Ok(());
-        }
-
-        // While a filter is active, Backspace edits the filter rather than
-        // triggering whatever action a config binds it to (e.g. NavParent).
-        if key.code == KeyCode::Backspace && !self.active_panel().filter.is_empty() {
-            self.last_tick_key_events.clear();
-            tx.send(Action::FilterBackspace)?;
-            return Ok(());
-        }
-
-        // Normal mode: keybinding lookup first.
-        let Some(keymap) = self.config.keybindings.0.get(&self.mode) else {
-            return Ok(());
-        };
-        if let Some(action) = keymap.get(&vec![key]) {
-            info!("Got action: {action:?}");
-            self.last_tick_key_events.clear();
-            tx.send(action.clone())?;
-        } else {
-            self.last_tick_key_events.push(key);
-            if let Some(action) = keymap.get(&self.last_tick_key_events) {
-                info!("Got action: {action:?}");
-                self.last_tick_key_events.clear();
-                tx.send(action.clone())?;
-            } else if self.last_tick_key_events.len() == 1 {
-                // Unbound single key → filter input or Esc to clear filter.
-                match key.code {
-                    KeyCode::Char(c)
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                    {
+            // While a filter is active, typed characters and Backspace edit the filter rather
+            // than triggering whatever the config binds them to (e.g. `j`, NavParent).
+            let filter_active = !self.active_panel().filter.is_empty();
+            if self.mode == Mode::Normal && filter_active {
+                match raw_key.code {
+                    KeyCode::Char(c) if filter_claims(filter_active, &key) => {
                         tx.send(Action::FilterChar(c))?;
+                        return Ok(());
                     }
-                    KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
-                    KeyCode::Esc => tx.send(Action::FilterClear)?,
+                    KeyCode::Backspace => {
+                        tx.send(Action::FilterBackspace)?;
+                        return Ok(());
+                    }
                     _ => {}
                 }
+            }
+        }
+
+        self.pending_keys.push(key);
+        let keymap = Arc::clone(&self.config.keymap);
+        match keymap.resolve(chain, &self.pending_keys) {
+            Lookup::Action(action) => {
+                info!("Got action: {action:?}");
+                self.pending_keys.clear();
+                tx.send(action)?;
+            }
+            Lookup::Prefix => self.pending_since = Some(Instant::now()),
+            Lookup::None if self.pending_keys.len() > 1 => {
+                // An unfinished sequence followed by a key that doesn't continue it: drop the
+                // sequence and treat the key on its own.
+                self.pending_keys.clear();
+                return self.handle_key_event(raw_key);
+            }
+            Lookup::None => {
+                self.pending_keys.clear();
+                return self.key_fallthrough(chain, raw_key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles a key that no binding claimed: text input, the Normal-mode filter, or nothing.
+    fn key_fallthrough(&mut self, chain: &[KeyContext], key: KeyEvent) -> color_eyre::Result<()> {
+        let tx = self.action_tx.clone();
+        let printable = match key.code {
+            KeyCode::Char(c) if is_printable(&key) => Some(c),
+            _ => None,
+        };
+        if chain.contains(&KeyContext::GitCommit) {
+            if let Some(ta) = &mut self.commit_textarea {
+                ta.input(key);
+            }
+        } else if chain.contains(&KeyContext::QuickCd) {
+            if let Some(c) = printable {
+                tx.send(Action::QuickCdChar(c))?;
+            }
+        } else if chain.contains(&KeyContext::Dialog) {
+            if let Some(c) = printable {
+                tx.send(Action::DialogInputChar(c))?;
+            }
+        } else if chain.contains(&KeyContext::Normal) {
+            match key.code {
+                KeyCode::Char(c) if printable.is_some() => tx.send(Action::FilterChar(c))?,
+                KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
+                KeyCode::Esc => tx.send(Action::FilterClear)?,
+                _ => {}
             }
         }
         Ok(())
@@ -431,7 +333,14 @@ impl App {
             }
             match action {
                 Action::Tick => {
-                    self.last_tick_key_events.drain(..);
+                    // Give up on an unfinished key sequence after a while.
+                    if self
+                        .pending_since
+                        .is_some_and(|t| t.elapsed() > KEY_SEQUENCE_TIMEOUT)
+                    {
+                        self.pending_keys.clear();
+                        self.pending_since = None;
+                    }
                 }
                 Action::Quit => {
                     last_paths::save(&get_data_dir(), &self.left.path, &self.right.path);
@@ -731,6 +640,16 @@ impl App {
                     self.ops.retain(|o| o.0 != id);
                 }
 
+                Action::GitPageUp => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.tab_page_up(10);
+                    }
+                }
+                Action::GitPageDown => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.tab_page_down(10);
+                    }
+                }
                 Action::GitReload | Action::GitOpCompleted => {
                     if let Some(gv) = &self.git_view {
                         GitView::load_status(gv.git_root.clone(), self.action_tx.clone());
@@ -821,7 +740,11 @@ impl App {
                     }
                 }
 
-                Action::Help => {}
+                // The help screen arrives with User Story 4.
+                Action::Help
+                | Action::HelpClose
+                | Action::HelpScrollUp
+                | Action::HelpScrollDown => {}
             }
         }
         Ok(())
@@ -3359,5 +3282,60 @@ fn target_label(sources: &[std::path::PathBuf]) -> String {
             .map_or_default(|n| n.to_string_lossy().into_owned())
     } else {
         format!("{} files", sources.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn empty_filter_claims_nothing() {
+        assert!(!filter_claims(
+            false,
+            &key(KeyCode::Char('j'), KeyModifiers::NONE)
+        ));
+        assert!(!filter_claims(
+            false,
+            &key(KeyCode::Char('?'), KeyModifiers::NONE)
+        ));
+    }
+
+    #[test]
+    fn active_filter_claims_typed_characters() {
+        for c in ['j', 'q', '?', '*'] {
+            assert!(
+                filter_claims(true, &key(KeyCode::Char(c), KeyModifiers::NONE)),
+                "{c}"
+            );
+        }
+        assert!(filter_claims(
+            true,
+            &key(KeyCode::Char('Y'), KeyModifiers::SHIFT)
+        ));
+    }
+
+    #[test]
+    fn active_filter_leaves_ctrl_alt_and_special_keys_to_bindings() {
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        ));
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::Char('5'), KeyModifiers::ALT)
+        ));
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::F(5), KeyModifiers::NONE)
+        ));
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::Enter, KeyModifiers::NONE)
+        ));
     }
 }

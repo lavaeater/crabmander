@@ -24,7 +24,7 @@ use tokio::{
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{debug, error, trace};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
@@ -128,7 +128,9 @@ impl Tui {
                 _ = tick_interval.tick() => Event::Tick,
                 _ = render_interval.tick() => Event::Render,
                 crossterm_event = event_stream.next().fuse() => match crossterm_event {
-                    Some(Ok(event)) => match event {
+                    Some(Ok(event)) => {
+                        Self::trace_key(&event);
+                        match event {
                         CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => Event::Key(key),
                         CrosstermEvent::Mouse(mouse) => Event::Mouse(mouse),
                         CrosstermEvent::Resize(x, y) => Event::Resize(x, y),
@@ -136,6 +138,7 @@ impl Tui {
                         CrosstermEvent::FocusGained => Event::FocusGained,
                         CrosstermEvent::Paste(s) => Event::Paste(s),
                         CrosstermEvent::Key(_) => continue, // ignore non-press key events
+                        }
                     }
                     Some(Err(_)) => Event::Error,
                     None => break, // the event stream has stopped and will not produce any more events
@@ -165,6 +168,20 @@ impl Tui {
         }
     }
 
+    /// Logs every raw key event, for checking what a terminal and keyboard layout actually send
+    /// (run with `RUST_LOG=crabmander=trace`).
+    fn trace_key(event: &CrosstermEvent) {
+        if let CrosstermEvent::Key(key) = event {
+            trace!(
+                code = ?key.code,
+                modifiers = ?key.modifiers,
+                kind = ?key.kind,
+                state = ?key.state,
+                "raw key event"
+            );
+        }
+    }
+
     pub fn enter(&mut self) -> color_eyre::Result<()> {
         crossterm::terminal::enable_raw_mode()?;
         crossterm::execute!(stdout(), EnterAlternateScreen, cursor::Hide)?;
@@ -184,6 +201,10 @@ impl Tui {
             );
             self.keyboard_enhanced = true;
         }
+        debug!(
+            enhanced = self.keyboard_enhanced,
+            "kitty keyboard protocol (disambiguate escape codes)"
+        );
         self.start();
         Ok(())
     }

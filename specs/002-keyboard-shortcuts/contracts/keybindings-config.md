@@ -42,7 +42,10 @@ User-facing contract for the `keybindings` section of the Crabmander config file
 
 ## Default bindings (shipped)
 
-Normal (F-key, then fallback):
+Normal (F-key, then fallbacks). Every F-key action also has a leader sequence that works in any
+terminal: `Ctrl+F` then the same digit (`-` for F11, `=` for F12), or `Ctrl+F`, `s`, digit for the
+Shift+F-key ones. Config notation: `<ctrl-f><5>`, `<ctrl-f><s><6>`. These are not repeated in the
+table.
 
 | Action | Keys |
 |--------|------|
@@ -73,7 +76,8 @@ Normal (F-key, then fallback):
 Removed from defaults: `Shift+X`, `Shift+E`, `Shift+Z`, `Shift+Y`, `Shift+R`, `Shift+K`, `Shift+D`,
 `Shift+S`, `Shift+T`, `Shift+G`.
 
-Git: today's hardcoded keys move to config unchanged, plus `Alt+1`…`Alt+7` mirroring `F1`…`F7`,
+Git: today's hardcoded keys move to config unchanged, plus `Alt+1`…`Alt+7` and `Ctrl+F 1`…`7`
+mirroring `F1`…`F7`,
 `?` Help, and `GitPageUp`/`GitPageDown` on PgUp/PgDn.
 
 GitBranch, GitTag, GlobalGit, Cargo: today's hardcoded keys move to config unchanged, plus `?` Help.

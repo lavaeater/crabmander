@@ -89,6 +89,16 @@ Findings from reading the current code (`src/app.rs`, `src/config.rs`, `src/tui.
   the above, adjust the normalization; consider adding `REPORT_ALTERNATE_KEYS`.
 - **Alternatives**: Matching on produced symbols per layout (needs layout tables, fragile).
 
+## R5b: Leader sequence for terminals that capture Alt+digit
+
+- **Decision** (user, 2026-11-20, after the Tilix spike): keep Alt+digit and add a leader sequence on
+  every F-key action: `<ctrl-f><5>` = F5, `<ctrl-f><0>` = F10, `<ctrl-f><->` = F11,
+  `<ctrl-f><=>` = F12, `<ctrl-f><s><6>` = Shift+F6. Uses the existing multi-key sequence support.
+- **Rationale**: Ctrl+F and unmodified digits arrive the same way in every terminal and layout, so this
+  needs no kitty protocol. On Swedish, `=` is Shift+0 and arrives as `Char('=')`, so it still matches.
+- **Alternatives**: leader only (two presses for everything); Alt+digit only (broken in Tilix by
+  default).
+
 ## R6: F11 and F12 fallbacks
 
 - **Decision**: `<alt-minus>` (F11, Select theme) and `<alt-=>` (F12, Global Git); add `equals` as a
@@ -131,3 +141,28 @@ Findings from reading the current code (`src/app.rs`, `src/config.rs`, `src/tui.
   key labels, and **a test that the shipped defaults produce zero problems in every context**
   (FR-006).
 - Manual checks in `quickstart.md` for real terminals and layouts (R5).
+
+## Spike results (T002)
+
+### Tilix (VTE), Swedish layout, 2026-11-20
+
+Kitty protocol: **not supported** (`enhanced=false`).
+
+| Pressed | Received | Notes |
+|---------|----------|-------|
+| Alt+5 | nothing | Tilix binds `<Alt>0`…`<Alt>9` to "switch to terminal N" by default (`gsettings list-recursively com.gexperts.Tilix.Keybindings`). Same for `<Ctrl><Alt>0…9` (sessions). |
+| Alt+Shift+6 | `Char('&')` + ALT | Layout symbol, SHIFT bit dropped. Matches the R5 prediction for legacy terminals. |
+| Alt+Minus | `Char('-')` + ALT | Works (the `-` key; on Swedish it is not next to 0). |
+| Alt+= | `Char('=')` + ALT | `=` is Shift+0 on Swedish; arrives without SHIFT. |
+| Shift+Y | `Char('Y')` + SHIFT | Both upper case and SHIFT bit. |
+
+Consequences:
+
+- Normalization of `Char` events: letters → upper case + SHIFT if either was reported, otherwise
+  lower case without SHIFT (`<Y>`, `<shift-y>`, `<shift-Y>` are equal); digits keep SHIFT as
+  reported (kitty reports Alt+Shift+6 as `'6'` + SHIFT and it must differ from Alt+6); any other
+  char drops SHIFT (legacy terminals omit it, as with `&` and `=` above).
+- Not yet tested: a kitty-protocol terminal. Alt+Shift+digit there is still the R5 prediction; the
+  leader sequence (R5b) works regardless.
+- Alt+digit is unavailable in Tilix (and likely GNOME Terminal/Konsole, which also use Alt+digit for
+  tabs) unless the user frees it in the terminal's settings.

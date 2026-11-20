@@ -1,6 +1,6 @@
 # Feature Specification: Keyboard Shortcut Overhaul
 
-**Feature Branch**: `speccy`
+**Feature Branch**: `002-keyboard-shortcuts`
 
 **Created**: 2026-11-20
 
@@ -169,6 +169,10 @@ the action named next to it.
   F-keys.
 - **FR-004a**: Alt+Shift+digit bindings MUST match the physical digit key, whatever character
   Shift+digit produces on the user's keyboard layout.
+- **FR-004c**: Every such action MUST also be reachable by a leader sequence that works in every
+  terminal and layout: Ctrl+F then the digit (or `-`, `=`) for Fn, and Ctrl+F, `s`, then the digit
+  for Shift+Fn (e.g. Ctrl+F 5 = F5, Ctrl+F s 6 = Shift+F6). Added 2026-11-20 after the Tilix spike
+  showed terminals that capture Alt+digit.
 - **FR-004b**: The previous Shift-letter fallbacks (Shift+X, E, Z, Y, R, K, D, S, T, G in Normal mode)
   MUST be removed from the built-in defaults. A user config that binds them explicitly MUST keep
   working.
@@ -237,8 +241,9 @@ the action named next to it.
   terminal reporting it; terminals with the kitty keyboard protocol can. Planning must confirm
   behaviour on terminals without it and on Nordic layouts, and document any limits in the help
   screen.
-- Alt combinations may be captured by some desktops or terminals (e.g. Alt+digit for tab switching);
-  every fallback is rebindable, so users in that situation can choose their own.
+- Alt combinations may be captured by some desktops or terminals (Tilix, GNOME Terminal and Konsole
+  use Alt+digit for tabs/panes); the Ctrl+F leader sequences (FR-004c) cover those, and every
+  fallback is rebindable.
 - Keys that the terminal emulator or desktop never delivers cannot be detected by Crabmander; the
   fallback scheme (FR-004) is the mitigation. A "show me which key you pressed" diagnostic is out of
   scope.

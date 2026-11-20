@@ -11,6 +11,7 @@ mod components;
 mod config;
 mod errors;
 mod git_repos;
+mod keymap;
 mod last_paths;
 mod logging;
 mod ops;

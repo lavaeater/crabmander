@@ -26,9 +26,10 @@ contexts, printable keys without Ctrl/Alt that match no binding go to the text f
 
 ## KeySeq
 
-Normalized key sequence: `Vec<KeyEvent>` where each event has `kind = Press`, empty `state`, and
-for `Char` codes the case and SHIFT bit as the terminal reports them (R5). Equality and hashing are
-on the normalized form.
+Normalized key sequence: `Vec<KeyEvent>` where each event has `kind = Press` and empty `state`.
+For `Char` codes (research.md "Spike results"): letters are upper case + SHIFT if either was
+reported, else lower case without SHIFT; digits keep SHIFT as reported; other chars drop SHIFT.
+Equality and hashing are on the normalized form.
 
 ## ActionSpec (static catalog)
 
