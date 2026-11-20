@@ -16,7 +16,10 @@ pub fn load(data_dir: &Path) -> LastPaths {
 }
 
 pub fn save(data_dir: &Path, left: &Path, right: &Path) {
-    let lp = LastPaths { left: Some(left.to_owned()), right: Some(right.to_owned()) };
+    let lp = LastPaths {
+        left: Some(left.to_owned()),
+        right: Some(right.to_owned()),
+    };
     if let Ok(json) = serde_json::to_string(&lp) {
         let _ = std::fs::write(data_dir.join(FILE), json);
     }

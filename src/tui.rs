@@ -10,9 +10,8 @@ use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind,
-        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
+        MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -182,9 +181,7 @@ impl Tui {
         if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
             let _ = crossterm::execute!(
                 stdout(),
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-                )
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,)
             );
             self.keyboard_enhanced = true;
         }

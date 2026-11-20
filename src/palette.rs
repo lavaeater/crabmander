@@ -67,9 +67,7 @@ impl From<&Theme> for Palette {
             entry_marked: Style::default().fg(c("warning")),
 
             status_normal: Style::default().add_modifier(Modifier::BOLD),
-            status_error: Style::default()
-                .fg(c("error"))
-                .add_modifier(Modifier::BOLD),
+            status_error: Style::default().fg(c("error")).add_modifier(Modifier::BOLD),
             status_size: Style::default().fg(c("warning")),
 
             filter_bar: Style::default().fg(c("bg.base")).bg(c("warning")),

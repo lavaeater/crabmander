@@ -1,15 +1,20 @@
-use std::{collections::{HashMap, HashSet}, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    },
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
 
 use crate::action::{
-    Action, BranchInfo, DiffLine, DiffSegment, GitBlameLine, GitCommit, GitEntry,
-    GitIndexStatus, GitReflogEntry, GitWorktreeStatus, SubmoduleInfo,
+    Action, BranchInfo, DiffLine, DiffSegment, GitBlameLine, GitCommit, GitEntry, GitIndexStatus,
+    GitReflogEntry, GitWorktreeStatus, SubmoduleInfo,
 };
 
 // ---------------------------------------------------------------------------
@@ -123,19 +128,24 @@ impl GitView {
         match self.tab {
             GitViewTab::Status => self.nav_down(),
             GitViewTab::Log => {
-                self.log_cursor = (self.log_cursor + 1).min(self.log_commits.len().saturating_sub(1));
+                self.log_cursor =
+                    (self.log_cursor + 1).min(self.log_commits.len().saturating_sub(1));
             }
             GitViewTab::Graph => {
-                self.graph_cursor = (self.graph_cursor + 1).min(self.graph_rows.len().saturating_sub(1));
+                self.graph_cursor =
+                    (self.graph_cursor + 1).min(self.graph_rows.len().saturating_sub(1));
             }
             GitViewTab::Reflog => {
-                self.reflog_cursor = (self.reflog_cursor + 1).min(self.reflog_entries.len().saturating_sub(1));
+                self.reflog_cursor =
+                    (self.reflog_cursor + 1).min(self.reflog_entries.len().saturating_sub(1));
             }
             GitViewTab::Diff => {
-                self.diff_offset = (self.diff_offset + 1).min(self.diff_lines.len().saturating_sub(1));
+                self.diff_offset =
+                    (self.diff_offset + 1).min(self.diff_lines.len().saturating_sub(1));
             }
             GitViewTab::Blame => {
-                self.blame_cursor = (self.blame_cursor + 1).min(self.blame_lines.len().saturating_sub(1));
+                self.blame_cursor =
+                    (self.blame_cursor + 1).min(self.blame_lines.len().saturating_sub(1));
             }
         }
     }
@@ -155,19 +165,24 @@ impl GitView {
         match self.tab {
             GitViewTab::Status => {}
             GitViewTab::Log => {
-                self.log_cursor = (self.log_cursor + page).min(self.log_commits.len().saturating_sub(1));
+                self.log_cursor =
+                    (self.log_cursor + page).min(self.log_commits.len().saturating_sub(1));
             }
             GitViewTab::Graph => {
-                self.graph_cursor = (self.graph_cursor + page).min(self.graph_rows.len().saturating_sub(1));
+                self.graph_cursor =
+                    (self.graph_cursor + page).min(self.graph_rows.len().saturating_sub(1));
             }
             GitViewTab::Reflog => {
-                self.reflog_cursor = (self.reflog_cursor + page).min(self.reflog_entries.len().saturating_sub(1));
+                self.reflog_cursor =
+                    (self.reflog_cursor + page).min(self.reflog_entries.len().saturating_sub(1));
             }
             GitViewTab::Diff => {
-                self.diff_offset = (self.diff_offset + page).min(self.diff_lines.len().saturating_sub(1));
+                self.diff_offset =
+                    (self.diff_offset + page).min(self.diff_lines.len().saturating_sub(1));
             }
             GitViewTab::Blame => {
-                self.blame_cursor = (self.blame_cursor + page).min(self.blame_lines.len().saturating_sub(1));
+                self.blame_cursor =
+                    (self.blame_cursor + page).min(self.blame_lines.len().saturating_sub(1));
             }
         }
     }
@@ -175,8 +190,14 @@ impl GitView {
     /// Return the path of the file under the cursor in the Status tab (for diff/blame).
     pub fn status_cursor_path(&self) -> Option<String> {
         match self.active_pane {
-            GitPane::Worktree => self.worktree_entries().get(self.left_cursor).map(|e| e.path.clone()),
-            GitPane::Staging => self.staging_entries().get(self.right_cursor).map(|e| e.path.clone()),
+            GitPane::Worktree => self
+                .worktree_entries()
+                .get(self.left_cursor)
+                .map(|e| e.path.clone()),
+            GitPane::Staging => self
+                .staging_entries()
+                .get(self.right_cursor)
+                .map(|e| e.path.clone()),
         }
     }
 
@@ -214,10 +235,7 @@ impl GitView {
                                 new_id: format!("{:.7}", e.id_new()),
                                 message: e.message().ok().flatten().unwrap_or("").to_owned(),
                                 timestamp: committer.when().seconds(),
-                                committer: committer
-                                    .name()
-                                    .unwrap_or("")
-                                    .to_owned(),
+                                committer: committer.name().unwrap_or("").to_owned(),
                             }
                         })
                         .collect();
@@ -243,8 +261,7 @@ impl GitView {
                 move || {
                     let repo = git2::Repository::open(&git_root)?;
                     let abs_path = git_root.join(&path);
-                    let content = std::fs::read_to_string(&abs_path)
-                        .unwrap_or_default();
+                    let content = std::fs::read_to_string(&abs_path).unwrap_or_default();
                     let file_lines: Vec<&str> = content.lines().collect();
 
                     let mut opts = git2::BlameOptions::new();
@@ -264,10 +281,7 @@ impl GitView {
                             .and_then(|s| s.name().ok())
                             .unwrap_or("?")
                             .to_owned();
-                        let timestamp = sig
-                            .as_ref()
-                            .map(|s| s.when().seconds())
-                            .unwrap_or(0);
+                        let timestamp = sig.as_ref().map(|s| s.when().seconds()).unwrap_or(0);
                         let start = hunk.final_start_line().saturating_sub(1);
                         let count = hunk.lines_in_hunk();
                         for i in 0..count {
@@ -293,7 +307,11 @@ impl GitView {
             .await;
             match result {
                 Ok(Ok(lines)) => {
-                    let _ = tx.send(Action::GitBlameLoaded { git_root, path, lines });
+                    let _ = tx.send(Action::GitBlameLoaded {
+                        git_root,
+                        path,
+                        lines,
+                    });
                 }
                 Ok(Err(e)) => info!("git blame error: {}", e),
                 Err(e) => info!("spawn_blocking error: {}", e),
@@ -322,7 +340,9 @@ impl GitView {
                             '-' => DiffSegment::Removed(content),
                             _ => DiffSegment::Context(content),
                         };
-                        diff_lines.push(DiffLine { segments: vec![seg] });
+                        diff_lines.push(DiffLine {
+                            segments: vec![seg],
+                        });
                         true
                     })?;
                     // Apply word-level diff to adjacent +/- lines
@@ -333,7 +353,11 @@ impl GitView {
             .await;
             match result {
                 Ok(Ok(lines)) => {
-                    let _ = tx.send(Action::GitDiffLoaded { git_root, path, lines });
+                    let _ = tx.send(Action::GitDiffLoaded {
+                        git_root,
+                        path,
+                        lines,
+                    });
                 }
                 Ok(Err(e)) => info!("git diff error: {}", e),
                 Err(e) => info!("spawn_blocking error: {}", e),
@@ -372,8 +396,17 @@ impl GitView {
         self.diff_offset = 0;
     }
 
-    pub fn on_status_loaded(&mut self, branch: String, entries: Vec<GitEntry>, submodules: Vec<SubmoduleInfo>) {
-        info!("on_status_loaded: {} total entries, {} submodules", entries.len(), submodules.len());
+    pub fn on_status_loaded(
+        &mut self,
+        branch: String,
+        entries: Vec<GitEntry>,
+        submodules: Vec<SubmoduleInfo>,
+    ) {
+        info!(
+            "on_status_loaded: {} total entries, {} submodules",
+            entries.len(),
+            submodules.len()
+        );
         self.branch = branch;
         let wt_len = entries.iter().filter(|e| e.worktree.is_some()).count();
         let st_len = entries.iter().filter(|e| e.index.is_some()).count();
@@ -381,23 +414,43 @@ impl GitView {
         self.left_cursor = self.left_cursor.min(wt_len.saturating_sub(1));
         self.right_cursor = self.right_cursor.min(st_len.saturating_sub(1));
         // Drop marks that no longer exist.
-        let wt: HashSet<_> = self.worktree_entries().into_iter().map(|e| e.path.clone()).collect();
-        let st: HashSet<_> = self.staging_entries().into_iter().map(|e| e.path.clone()).collect();
+        let wt: HashSet<_> = self
+            .worktree_entries()
+            .into_iter()
+            .map(|e| e.path.clone())
+            .collect();
+        let st: HashSet<_> = self
+            .staging_entries()
+            .into_iter()
+            .map(|e| e.path.clone())
+            .collect();
         self.left_marked.retain(|p| wt.contains(p));
         self.right_marked.retain(|p| st.contains(p));
-        self.submodule_statuses = submodules.into_iter().map(|s| (s.path.clone(), s)).collect();
+        self.submodule_statuses = submodules
+            .into_iter()
+            .map(|s| (s.path.clone(), s))
+            .collect();
     }
 
     pub fn dirty_submodules(&self) -> Vec<&SubmoduleInfo> {
-        self.submodule_statuses.values().filter(|s| s.is_dirty()).collect()
+        self.submodule_statuses
+            .values()
+            .filter(|s| s.is_dirty())
+            .collect()
     }
 
     pub fn all_submodule_paths(&self) -> Vec<PathBuf> {
-        self.submodule_statuses.values().map(|s| s.abs_path.clone()).collect()
+        self.submodule_statuses
+            .values()
+            .map(|s| s.abs_path.clone())
+            .collect()
     }
 
     fn worktree_entries(&self) -> Vec<&GitEntry> {
-        self.entries.iter().filter(|e| e.worktree.is_some()).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.worktree.is_some())
+            .collect()
     }
 
     fn staging_entries(&self) -> Vec<&GitEntry> {
@@ -541,7 +594,11 @@ impl GitView {
                                 None
                             };
                             if index.is_some() || worktree.is_some() {
-                                Some(GitEntry { path, index, worktree })
+                                Some(GitEntry {
+                                    path,
+                                    index,
+                                    worktree,
+                                })
                             } else {
                                 None
                             }
@@ -563,7 +620,12 @@ impl GitView {
 
             match result {
                 Ok(Ok((branch, entries, submodules))) => {
-                    let _ = tx.send(Action::GitStatusLoaded { git_root, branch, entries, submodules });
+                    let _ = tx.send(Action::GitStatusLoaded {
+                        git_root,
+                        branch,
+                        entries,
+                        submodules,
+                    });
                 }
                 Ok(Err(e)) => {
                     info!("git2 status error: {}", e);
@@ -608,9 +670,7 @@ impl GitView {
                 }
 
                 // Sort local: current first, then alphabetical.
-                branches.sort_by(|a, b| {
-                    b.is_current.cmp(&a.is_current).then(a.name.cmp(&b.name))
-                });
+                branches.sort_by(|a, b| b.is_current.cmp(&a.is_current).then(a.name.cmp(&b.name)));
 
                 // Remote branches that have no local counterpart.
                 let mut remote_branches: Vec<BranchInfo> = Vec::new();
@@ -692,7 +752,9 @@ impl GitView {
         for (label, t) in &tabs {
             let is_active = *t == self.tab;
             let style = if is_active {
-                palette.border_active.add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                palette
+                    .border_active
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
             } else {
                 Style::default().add_modifier(Modifier::DIM)
             };
@@ -792,9 +854,7 @@ impl GitView {
                     let style = match ch {
                         GraphChar::Node => palette.git_idx_added.add_modifier(Modifier::BOLD),
                         GraphChar::Vertical => palette.git_wt_modified,
-                        GraphChar::BranchRight | GraphChar::BranchLeft => {
-                            palette.git_wt_untracked
-                        }
+                        GraphChar::BranchRight | GraphChar::BranchLeft => palette.git_wt_untracked,
                         GraphChar::Space => Style::default(),
                     };
                     spans.push(Span::styled(ch.to_str(), style));
@@ -806,7 +866,10 @@ impl GitView {
                     } else {
                         format!(" ({})", commit.refs.join(", "))
                     };
-                    spans.push(Span::styled(format!(" {} ", commit.id_short), palette.git_idx_added));
+                    spans.push(Span::styled(
+                        format!(" {} ", commit.id_short),
+                        palette.git_idx_added,
+                    ));
                     spans.push(Span::styled(refs_str, palette.git_wt_modified));
                     spans.push(Span::raw(&commit.summary));
                 }
@@ -898,7 +961,9 @@ impl GitView {
         }
 
         let visible = inner.height as usize;
-        self.diff_offset = self.diff_offset.min(self.diff_lines.len().saturating_sub(1));
+        self.diff_offset = self
+            .diff_offset
+            .min(self.diff_lines.len().saturating_sub(1));
 
         let total = self.diff_lines.len();
         let items: Vec<ListItem> = self
@@ -976,9 +1041,15 @@ impl GitView {
                 let date = format_date(bl.timestamp);
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", bl.commit_short), palette.git_idx_added),
-                    Span::styled(format!("{:<14} ", truncate(&bl.author, 14)), palette.git_wt_modified),
+                    Span::styled(
+                        format!("{:<14} ", truncate(&bl.author, 14)),
+                        palette.git_wt_modified,
+                    ),
                     Span::styled(format!("{} ", date), palette.git_wt_untracked),
-                    Span::styled(format!("{:>5} ", bl.line_no), Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(
+                        format!("{:>5} ", bl.line_no),
+                        Style::default().add_modifier(Modifier::DIM),
+                    ),
                     Span::raw(&bl.content),
                 ]);
                 let style = if is_cursor {
@@ -995,7 +1066,11 @@ impl GitView {
 
     fn draw_worktree(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let is_active = self.active_pane == GitPane::Worktree;
-        let border_style = if is_active { palette.border_active } else { palette.border_inactive };
+        let border_style = if is_active {
+            palette.border_active
+        } else {
+            palette.border_inactive
+        };
         let wt_count = self.entries.iter().filter(|e| e.worktree.is_some()).count();
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1005,11 +1080,11 @@ impl GitView {
         frame.render_widget(block, area);
 
         // Collect entries first so we can then mutably update the offset.
-        let entries: Vec<(String, Option<GitIndexStatus>, Option<GitWorktreeStatus>)> =
-            self.worktree_entries()
-                .into_iter()
-                .map(|e| (e.path.clone(), e.index.clone(), e.worktree.clone()))
-                .collect();
+        let entries: Vec<(String, Option<GitIndexStatus>, Option<GitWorktreeStatus>)> = self
+            .worktree_entries()
+            .into_iter()
+            .map(|e| (e.path.clone(), e.index.clone(), e.worktree.clone()))
+            .collect();
 
         if entries.is_empty() {
             frame.render_widget(
@@ -1021,7 +1096,12 @@ impl GitView {
         }
 
         let visible = inner.height as usize;
-        info!("draw_worktree: {} entries, inner_h={}, offset={}", entries.len(), visible, self.left_offset);
+        info!(
+            "draw_worktree: {} entries, inner_h={}, offset={}",
+            entries.len(),
+            visible,
+            self.left_offset
+        );
         if self.left_cursor < self.left_offset {
             self.left_offset = self.left_cursor;
         } else if visible > 0 && self.left_cursor >= self.left_offset + visible {
@@ -1045,7 +1125,9 @@ impl GitView {
 
                 let (label, base_style) = if let Some(sub) = submodule_statuses.get(path.as_str()) {
                     let badge = submodule_badge(sub);
-                    let branch_hint = sub.branch.as_deref()
+                    let branch_hint = sub
+                        .branch
+                        .as_deref()
                         .map(|b| format!("  ({})", b))
                         .unwrap_or_default();
                     (
@@ -1057,7 +1139,11 @@ impl GitView {
                     (format!(" {} {} {}", mark, ch, path), style)
                 };
 
-                let base = if is_marked { palette.entry_marked } else { base_style };
+                let base = if is_marked {
+                    palette.entry_marked
+                } else {
+                    base_style
+                };
                 let style = if is_cursor && is_active {
                     base.add_modifier(Modifier::REVERSED)
                 } else if is_cursor {
@@ -1074,7 +1160,11 @@ impl GitView {
 
     fn draw_staging(&mut self, frame: &mut Frame, area: Rect, palette: &crate::palette::Palette) {
         let is_active = self.active_pane == GitPane::Staging;
-        let border_style = if is_active { palette.border_active } else { palette.border_inactive };
+        let border_style = if is_active {
+            palette.border_active
+        } else {
+            palette.border_inactive
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
@@ -1082,11 +1172,11 @@ impl GitView {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let entries: Vec<(String, Option<GitIndexStatus>, Option<GitWorktreeStatus>)> =
-            self.staging_entries()
-                .into_iter()
-                .map(|e| (e.path.clone(), e.index.clone(), e.worktree.clone()))
-                .collect();
+        let entries: Vec<(String, Option<GitIndexStatus>, Option<GitWorktreeStatus>)> = self
+            .staging_entries()
+            .into_iter()
+            .map(|e| (e.path.clone(), e.index.clone(), e.worktree.clone()))
+            .collect();
 
         if entries.is_empty() {
             frame.render_widget(
@@ -1115,7 +1205,11 @@ impl GitView {
                 let (ch, base_style) = index_status_display(idx.as_ref().unwrap(), palette);
                 let mark = if is_marked { "*" } else { " " };
                 let label = format!(" {} {} {}", mark, ch, path);
-                let base = if is_marked { palette.entry_marked } else { base_style };
+                let base = if is_marked {
+                    palette.entry_marked
+                } else {
+                    base_style
+                };
                 let style = if is_cursor && is_active {
                     base.add_modifier(Modifier::REVERSED)
                 } else if is_cursor {
@@ -1136,23 +1230,33 @@ impl GitView {
 // ---------------------------------------------------------------------------
 
 /// Load up to `limit` commits from HEAD via revwalk.
-fn load_commits_blocking(git_root: &std::path::Path, limit: usize) -> Result<Vec<GitCommit>, git2::Error> {
+fn load_commits_blocking(
+    git_root: &std::path::Path,
+    limit: usize,
+) -> Result<Vec<GitCommit>, git2::Error> {
     let repo = git2::Repository::open(git_root)?;
 
     // Build a map from OID → refs for decoration.
-    let mut ref_map: std::collections::HashMap<git2::Oid, Vec<String>> = std::collections::HashMap::new();
+    let mut ref_map: std::collections::HashMap<git2::Oid, Vec<String>> =
+        std::collections::HashMap::new();
     let head_id = repo.head().ok().and_then(|h| h.target());
-    let head_branch = repo.head().ok().and_then(|h| h.shorthand().ok().map(str::to_owned));
+    let head_branch = repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().ok().map(str::to_owned));
 
     for reference in repo.references()?.flatten() {
-        let Some(oid) = reference.target() else { continue };
+        let Some(oid) = reference.target() else {
+            continue;
+        };
         let name = reference.shorthand().unwrap_or("").to_owned();
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
 
         // For the HEAD ref build "HEAD -> branch" decoration.
         let decoration = if reference.is_branch() {
-            let is_head = head_id == Some(oid)
-                && head_branch.as_deref() == Some(&name);
+            let is_head = head_id == Some(oid) && head_branch.as_deref() == Some(&name);
             if is_head {
                 format!("HEAD -> {}", name)
             } else {
@@ -1169,16 +1273,21 @@ fn load_commits_blocking(git_root: &std::path::Path, limit: usize) -> Result<Vec
     }
 
     // Peel annotated tags to their commit target.
-    let mut peeled_map: std::collections::HashMap<git2::Oid, Vec<String>> = std::collections::HashMap::new();
+    let mut peeled_map: std::collections::HashMap<git2::Oid, Vec<String>> =
+        std::collections::HashMap::new();
     for reference in repo.references()?.flatten() {
         if reference.is_tag()
-            && let Ok(obj) = reference.peel(git2::ObjectType::Commit) {
-                let commit_oid = obj.id();
-                let name = reference.shorthand().unwrap_or("").to_owned();
-                if !name.is_empty() {
-                    peeled_map.entry(commit_oid).or_default().push(format!("tag: {}", name));
-                }
+            && let Ok(obj) = reference.peel(git2::ObjectType::Commit)
+        {
+            let commit_oid = obj.id();
+            let name = reference.shorthand().unwrap_or("").to_owned();
+            if !name.is_empty() {
+                peeled_map
+                    .entry(commit_oid)
+                    .or_default()
+                    .push(format!("tag: {}", name));
             }
+        }
     }
     for (oid, decs) in peeled_map {
         let entry = ref_map.entry(oid).or_default();
@@ -1260,13 +1369,10 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
             .position(|l| l.as_deref() == Some(&commit.id))
             .unwrap_or_else(|| {
                 // New head — find an empty lane or push one.
-                lanes
-                    .iter()
-                    .position(|l| l.is_none())
-                    .unwrap_or_else(|| {
-                        lanes.push(None);
-                        lanes.len() - 1
-                    })
+                lanes.iter().position(|l| l.is_none()).unwrap_or_else(|| {
+                    lanes.push(None);
+                    lanes.len() - 1
+                })
             });
 
         // Set up parents: first parent inherits the lane, extras get new lanes.
@@ -1275,7 +1381,10 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
         let mut extra_cols: Vec<usize> = Vec::new();
         for parent_id in commit.parent_ids.iter().skip(1) {
             // Check if it's already tracked in a lane.
-            if let Some(existing) = new_lanes.iter().position(|l| l.as_deref() == Some(parent_id)) {
+            if let Some(existing) = new_lanes
+                .iter()
+                .position(|l| l.as_deref() == Some(parent_id))
+            {
                 extra_cols.push(existing);
             } else {
                 let slot = new_lanes
@@ -1306,7 +1415,10 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
             prefix.push(GraphChar::Space);
         }
 
-        rows.push(GraphRow { prefix, commit: Some(commit.clone()) });
+        rows.push(GraphRow {
+            prefix,
+            commit: Some(commit.clone()),
+        });
 
         // Emit connector rows for merges (when extra parents go to different lanes).
         if !extra_cols.is_empty() {
@@ -1335,7 +1447,10 @@ pub fn build_graph(commits: &[GitCommit]) -> Vec<GraphRow> {
                 }
                 conn.push(GraphChar::Space);
             }
-            rows.push(GraphRow { prefix: conn, commit: None });
+            rows.push(GraphRow {
+                prefix: conn,
+                commit: None,
+            });
         }
 
         lanes = new_lanes;
@@ -1358,7 +1473,8 @@ fn apply_word_diff(lines: Vec<DiffLine>) -> Vec<DiffLine> {
     while i < lines.len() {
         // Find a run of removed lines followed immediately by added lines.
         let rem_start = i;
-        while i < lines.len() && matches!(lines[i].segments.first(), Some(DiffSegment::Removed(_))) {
+        while i < lines.len() && matches!(lines[i].segments.first(), Some(DiffSegment::Removed(_)))
+        {
             i += 1;
         }
         let add_start = i;
@@ -1491,10 +1607,18 @@ fn format_timestamp(ts: i64) -> String {
         .unwrap_or(Duration::ZERO)
         .as_secs() as i64;
     let delta = now - ts;
-    if delta < 60 { return "just now".into(); }
-    if delta < 3600 { return format!("{}m ago", delta / 60); }
-    if delta < 86400 { return format!("{}h ago", delta / 3600); }
-    if delta < 86400 * 30 { return format!("{}d ago", delta / 86400); }
+    if delta < 60 {
+        return "just now".into();
+    }
+    if delta < 3600 {
+        return format!("{}m ago", delta / 60);
+    }
+    if delta < 86400 {
+        return format!("{}h ago", delta / 3600);
+    }
+    if delta < 86400 * 30 {
+        return format!("{}d ago", delta / 86400);
+    }
     format_date(ts)
 }
 
@@ -1507,14 +1631,31 @@ fn format_date(ts: i64) -> String {
     let mut d = days as u32;
     loop {
         let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if d < days_in_year { break; }
+        if d < days_in_year {
+            break;
+        }
         d -= days_in_year;
         y += 1;
     }
-    let month_days: [u32; 12] = [31, if is_leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days: [u32; 12] = [
+        31,
+        if is_leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut mo = 1u32;
     for &md in &month_days {
-        if d < md { break; }
+        if d < md {
+            break;
+        }
         d -= md;
         mo += 1;
     }
@@ -1549,7 +1690,9 @@ fn collect_submodule_statuses(
                 .ok()
                 .and_then(|h| h.shorthand().ok().map(str::to_owned));
             let mut opts = git2::StatusOptions::new();
-            opts.include_untracked(true).recurse_untracked_dirs(true).include_ignored(false);
+            opts.include_untracked(true)
+                .recurse_untracked_dirs(true)
+                .include_ignored(false);
             let statuses = sub_repo.statuses(Some(&mut opts)).ok()?;
             let mut staged = 0usize;
             let mut wt_modified = 0usize;
@@ -1570,17 +1713,34 @@ fn collect_submodule_statuses(
                     wt_modified += 1;
                 }
             }
-            Some(SubmoduleInfo { path: rel_path, abs_path, branch, staged, wt_modified, wt_untracked })
+            Some(SubmoduleInfo {
+                path: rel_path,
+                abs_path,
+                branch,
+                staged,
+                wt_modified,
+                wt_untracked,
+            })
         })
         .collect()
 }
 
 fn submodule_badge(sub: &SubmoduleInfo) -> String {
     let mut parts = Vec::new();
-    if sub.staged > 0 { parts.push(format!("+{}", sub.staged)); }
-    if sub.wt_modified > 0 { parts.push(format!("~{}", sub.wt_modified)); }
-    if sub.wt_untracked > 0 { parts.push(format!("?{}", sub.wt_untracked)); }
-    if parts.is_empty() { "[clean]".into() } else { format!("[{}]", parts.join(" ")) }
+    if sub.staged > 0 {
+        parts.push(format!("+{}", sub.staged));
+    }
+    if sub.wt_modified > 0 {
+        parts.push(format!("~{}", sub.wt_modified));
+    }
+    if sub.wt_untracked > 0 {
+        parts.push(format!("?{}", sub.wt_untracked));
+    }
+    if parts.is_empty() {
+        "[clean]".into()
+    } else {
+        format!("[{}]", parts.join(" "))
+    }
 }
 
 // --- Display helpers ---
@@ -1590,22 +1750,19 @@ fn worktree_status_display(
     p: &crate::palette::Palette,
 ) -> (&'static str, Style) {
     match s {
-        GitWorktreeStatus::Modified  => ("M", p.git_wt_modified),
-        GitWorktreeStatus::Deleted   => ("D", p.git_wt_deleted),
+        GitWorktreeStatus::Modified => ("M", p.git_wt_modified),
+        GitWorktreeStatus::Deleted => ("D", p.git_wt_deleted),
         GitWorktreeStatus::Untracked => ("?", p.git_wt_untracked),
     }
 }
 
-fn index_status_display(
-    s: &GitIndexStatus,
-    p: &crate::palette::Palette,
-) -> (&'static str, Style) {
+fn index_status_display(s: &GitIndexStatus, p: &crate::palette::Palette) -> (&'static str, Style) {
     match s {
-        GitIndexStatus::Added    => ("A", p.git_idx_added),
+        GitIndexStatus::Added => ("A", p.git_idx_added),
         GitIndexStatus::Modified => ("M", p.git_idx_modified),
-        GitIndexStatus::Deleted  => ("D", p.git_idx_deleted),
-        GitIndexStatus::Renamed  => ("R", p.git_idx_renamed),
-        GitIndexStatus::Copied   => ("C", p.git_idx_renamed),
+        GitIndexStatus::Deleted => ("D", p.git_idx_deleted),
+        GitIndexStatus::Renamed => ("R", p.git_idx_renamed),
+        GitIndexStatus::Copied => ("C", p.git_idx_renamed),
     }
 }
 
@@ -1615,11 +1772,19 @@ mod tests {
     use crate::action::{GitEntry, GitIndexStatus, GitWorktreeStatus};
 
     fn wt_entry(path: &str) -> GitEntry {
-        GitEntry { path: path.to_owned(), index: None, worktree: Some(GitWorktreeStatus::Modified) }
+        GitEntry {
+            path: path.to_owned(),
+            index: None,
+            worktree: Some(GitWorktreeStatus::Modified),
+        }
     }
 
     fn idx_entry(path: &str) -> GitEntry {
-        GitEntry { path: path.to_owned(), index: Some(GitIndexStatus::Added), worktree: None }
+        GitEntry {
+            path: path.to_owned(),
+            index: Some(GitIndexStatus::Added),
+            worktree: None,
+        }
     }
 
     fn both_entry(path: &str) -> GitEntry {
@@ -1757,4 +1922,3 @@ mod tests {
         assert!(!v.left_marked.contains("b.rs"));
     }
 }
-

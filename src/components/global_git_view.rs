@@ -85,7 +85,11 @@ impl GlobalGitView {
                 Ok(Ok(v)) => v,
                 _ => (None, false),
             };
-            let _ = tx.send(Action::GitRepoInfoLoaded { path, branch, is_dirty });
+            let _ = tx.send(Action::GitRepoInfoLoaded {
+                path,
+                branch,
+                is_dirty,
+            });
         });
     }
 
@@ -123,15 +127,14 @@ impl GlobalGitView {
                 let is_cursor = i == self.cursor;
                 let display_path = path.to_string_lossy();
 
-                let (branch_str, dirty_marker) =
-                    match self.repo_meta.get(path) {
-                        Some((branch, dirty)) => {
-                            let b = branch.as_deref().unwrap_or("?");
-                            let d = if *dirty { "*" } else { "" };
-                            (format!("[{}{}]", b, d), true)
-                        }
-                        None => ("…".into(), false),
-                    };
+                let (branch_str, dirty_marker) = match self.repo_meta.get(path) {
+                    Some((branch, dirty)) => {
+                        let b = branch.as_deref().unwrap_or("?");
+                        let d = if *dirty { "*" } else { "" };
+                        (format!("[{}{}]", b, d), true)
+                    }
+                    None => ("…".into(), false),
+                };
 
                 let path_style = if is_cursor {
                     palette.border_active.add_modifier(Modifier::REVERSED)

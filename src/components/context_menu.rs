@@ -60,7 +60,10 @@ impl ContextMenuProvider for OsOpenProvider {
             ctx.panel_dir.clone()
         };
         vec![
-            MenuItem::new("Open with OS (xdg-open)", MenuAction::OpenWithOs(ctx.entry_path.clone())),
+            MenuItem::new(
+                "Open with OS (xdg-open)",
+                MenuAction::OpenWithOs(ctx.entry_path.clone()),
+            ),
             MenuItem::new("Run VS Code here", MenuAction::RunCodeHere(code_dir)),
         ]
     }
@@ -126,7 +129,10 @@ impl ContextMenuProvider for ExecuteProvider {
         if ctx.entry.is_dir || !is_executable(&ctx.entry_path) {
             return vec![];
         }
-        vec![MenuItem::new("Execute…", MenuAction::RequestExecute(ctx.entry_path.clone()))]
+        vec![MenuItem::new(
+            "Execute…",
+            MenuAction::RequestExecute(ctx.entry_path.clone()),
+        )]
     }
 }
 
@@ -161,12 +167,16 @@ impl ContextMenuProvider for DeviceProvider {
                 if let Some(mp) = &dev.mountpoint {
                     Some(MenuItem::new(
                         format!("Unmount {} — {} at {}", dev.name, dev.human_label(), mp),
-                        MenuAction::UnmountDevice { device: dev.name.clone() },
+                        MenuAction::UnmountDevice {
+                            device: dev.name.clone(),
+                        },
                     ))
                 } else if dev.fstype.is_some() {
                     Some(MenuItem::new(
                         format!("Mount {} — {}", dev.name, dev.human_label()),
-                        MenuAction::MountDevice { device: dev.name.clone() },
+                        MenuAction::MountDevice {
+                            device: dev.name.clone(),
+                        },
                     ))
                 } else {
                     None
@@ -190,17 +200,33 @@ pub struct RemovableDev {
 impl RemovableDev {
     fn human_label(&self) -> String {
         let mut parts: Vec<&str> = Vec::new();
-        if let Some(s) = &self.size { parts.push(s); }
-        if let Some(fs) = &self.fstype { parts.push(fs); }
-        if let Some(lbl) = &self.label { parts.push(lbl); }
-        if let Some(model) = &self.model { parts.push(model); }
-        if parts.is_empty() { self.name.clone() } else { parts.join(", ") }
+        if let Some(s) = &self.size {
+            parts.push(s);
+        }
+        if let Some(fs) = &self.fstype {
+            parts.push(fs);
+        }
+        if let Some(lbl) = &self.label {
+            parts.push(lbl);
+        }
+        if let Some(model) = &self.model {
+            parts.push(model);
+        }
+        if parts.is_empty() {
+            self.name.clone()
+        } else {
+            parts.join(", ")
+        }
     }
 }
 
 fn enumerate_removable_devices() -> Vec<RemovableDev> {
     let Ok(out) = std::process::Command::new("lsblk")
-        .args(["-J", "-o", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,HOTPLUG,TYPE"])
+        .args([
+            "-J",
+            "-o",
+            "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT,MODEL,HOTPLUG,TYPE",
+        ])
         .output()
     else {
         return Vec::new();
@@ -233,13 +259,22 @@ pub fn collect_removable<'a>(
         .map(str::to_owned);
 
     if hotplug && (kind == "part" || kind == "disk") {
-        let fstype = node["fstype"].as_str().filter(|s| !s.is_empty()).map(String::from);
+        let fstype = node["fstype"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(String::from);
         if fstype.is_some() || kind == "part" {
             out.push(RemovableDev {
                 name: node["name"].as_str().unwrap_or("").to_owned(),
-                size: node["size"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                size: node["size"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
                 fstype,
-                label: node["label"].as_str().filter(|s| !s.is_empty()).map(String::from),
+                label: node["label"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
                 model,
                 mountpoint: node["mountpoint"]
                     .as_str()
@@ -316,10 +351,7 @@ mod tests {
     #[test]
     fn archive_provider_uses_count_label_for_multiple_archives() {
         let mut c = ctx("a.zip", false);
-        c.effective_targets = vec![
-            PathBuf::from("/tmp/a.zip"),
-            PathBuf::from("/tmp/b.tar.gz"),
-        ];
+        c.effective_targets = vec![PathBuf::from("/tmp/a.zip"), PathBuf::from("/tmp/b.tar.gz")];
         let items = ArchiveProvider.items(&c);
         assert_eq!(items.len(), 2);
         assert!(items[0].label.contains("2 archives"));

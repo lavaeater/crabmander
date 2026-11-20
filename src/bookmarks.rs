@@ -14,9 +14,7 @@ pub fn load(data_dir: &Path) -> Vec<PathBuf> {
 }
 
 pub fn save(data_dir: &Path, dirs: &[PathBuf]) {
-    let strings: Vec<&str> = dirs.iter()
-        .filter_map(|p| p.to_str())
-        .collect();
+    let strings: Vec<&str> = dirs.iter().filter_map(|p| p.to_str()).collect();
     if let Ok(json) = serde_json::to_string(&strings) {
         let _ = std::fs::write(data_dir.join(FILE), json);
     }
@@ -74,8 +72,8 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let dir = std::env::temp_dir()
-            .join(format!("crabmander-test-bookmarks-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("crabmander-test-bookmarks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let expected = vec![PathBuf::from("/foo"), PathBuf::from("/bar/baz")];
         save(&dir, &expected);

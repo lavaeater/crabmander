@@ -14,14 +14,30 @@ pub enum MenuAction {
     OpenWithOs(PathBuf),
     RunCodeHere(PathBuf),
     RequestExecute(PathBuf), // opens an args Input dialog, then runs
-    ExtractHere { archives: Vec<PathBuf>, dest: PathBuf },
-    MountDevice { device: String },
-    UnmountDevice { device: String },
-    Chown { paths: Vec<PathBuf>, current_owner: String, reload_sides: Vec<crate::action::Side> },
+    ExtractHere {
+        archives: Vec<PathBuf>,
+        dest: PathBuf,
+    },
+    MountDevice {
+        device: String,
+    },
+    UnmountDevice {
+        device: String,
+    },
+    Chown {
+        paths: Vec<PathBuf>,
+        current_owner: String,
+        reload_sides: Vec<crate::action::Side>,
+    },
     SetTheme(String),
     CdTo(std::path::PathBuf),
-    GitPush { follow_tags: bool },
-    NewBranchInScope { git_root: std::path::PathBuf, recursive: bool },
+    GitPush {
+        follow_tags: bool,
+    },
+    NewBranchInScope {
+        git_root: std::path::PathBuf,
+        recursive: bool,
+    },
     AddBookmark(PathBuf),
     RemoveBookmark(PathBuf),
     RemoveRecent(PathBuf),
@@ -87,7 +103,11 @@ pub enum DialogState {
 }
 
 impl DialogState {
-    pub fn confirm(title: impl Into<String>, message: impl Into<String>, op: Box<dyn DeferredOp>) -> Self {
+    pub fn confirm(
+        title: impl Into<String>,
+        message: impl Into<String>,
+        op: Box<dyn DeferredOp>,
+    ) -> Self {
         Self::Confirm {
             title: title.into(),
             message: message.into(),
@@ -163,9 +183,7 @@ impl DialogState {
             } if *selected + 1 < matches.len() => {
                 *selected += 1;
             }
-            Self::ErrorList {
-                scroll, errors, ..
-            } if *scroll + 1 < errors.len() => {
+            Self::ErrorList { scroll, errors, .. } if *scroll + 1 < errors.len() => {
                 *scroll += 1;
             }
             _ => {}
@@ -179,7 +197,12 @@ impl DialogState {
 
 // --- Rendering ---
 
-pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate::palette::Palette) {
+pub fn draw(
+    frame: &mut Frame,
+    dialog: &DialogState,
+    area: Rect,
+    palette: &crate::palette::Palette,
+) {
     match dialog {
         DialogState::Confirm { title, message, .. } => {
             let popup = centered_rect(64, 8, area);
@@ -196,7 +219,12 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
             frame.render_widget(para, popup);
         }
 
-        DialogState::Input { title, prompt, value, .. } => {
+        DialogState::Input {
+            title,
+            prompt,
+            value,
+            ..
+        } => {
             let popup = centered_rect(64, 8, area);
             frame.render_widget(Clear, popup);
             let block = Block::default()
@@ -215,13 +243,11 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
             .areas(inner);
 
             frame.render_widget(
-                Paragraph::new(prompt.as_str()).style(Style::default().add_modifier(Modifier::BOLD)),
+                Paragraph::new(prompt.as_str())
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
                 prompt_area,
             );
-            frame.render_widget(
-                Paragraph::new(format!("{}_", value)),
-                value_area,
-            );
+            frame.render_widget(Paragraph::new(format!("{}_", value)), value_area);
             frame.render_widget(
                 Paragraph::new("[ Enter ] OK   [ Esc ] Cancel")
                     .alignment(Alignment::Center)
@@ -230,7 +256,12 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
             );
         }
 
-        DialogState::QuickCd { input, matches, selected, .. } => {
+        DialogState::QuickCd {
+            input,
+            matches,
+            selected,
+            ..
+        } => {
             let height = (matches.len() as u16 + 6)
                 .clamp(10, 24)
                 .min(area.height.saturating_sub(2));
@@ -290,7 +321,11 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
             );
         }
 
-        DialogState::ContextMenu { title, items, selected } => {
+        DialogState::ContextMenu {
+            title,
+            items,
+            selected,
+        } => {
             let has_deletable = items.iter().any(|i| i.delete_action.is_some());
             let hint_height: u16 = if has_deletable { 1 } else { 0 };
             let height = (items.len() as u16 + 4 + hint_height).min(area.height.saturating_sub(2));
@@ -335,7 +370,11 @@ pub fn draw(frame: &mut Frame, dialog: &DialogState, area: Rect, palette: &crate
             }
         }
 
-        DialogState::ErrorList { title, errors, scroll } => {
+        DialogState::ErrorList {
+            title,
+            errors,
+            scroll,
+        } => {
             let visible_lines = 10u16;
             let height = (visible_lines + 4).min(area.height.saturating_sub(2));
             let popup = centered_rect(72, height, area);
@@ -421,7 +460,13 @@ mod tests {
     #[test]
     fn input_constructor_stores_fields() {
         let d = DialogState::input("Copy", "Copy to:", "/dest", dummy_op());
-        if let DialogState::Input { title, prompt, value, .. } = d {
+        if let DialogState::Input {
+            title,
+            prompt,
+            value,
+            ..
+        } = d
+        {
             assert_eq!(title, "Copy");
             assert_eq!(prompt, "Copy to:");
             assert_eq!(value, "/dest");
@@ -433,7 +478,10 @@ mod tests {
     #[test]
     fn context_menu_constructor_starts_at_zero() {
         let d = DialogState::context_menu("Menu", menu_items(5));
-        if let DialogState::ContextMenu { selected, items, .. } = &d {
+        if let DialogState::ContextMenu {
+            selected, items, ..
+        } = &d
+        {
             assert_eq!(*selected, 0);
             assert_eq!(items.len(), 5);
         } else {
@@ -524,7 +572,7 @@ mod tests {
         let mut d = DialogState::context_menu("M", menu_items(3));
         d.nav_down();
         d.nav_down(); // selected = 2
-        d.nav_up();   // selected = 1
+        d.nav_up(); // selected = 1
         if let DialogState::ContextMenu { selected, .. } = &d {
             assert_eq!(*selected, 1);
         }

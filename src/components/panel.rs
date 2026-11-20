@@ -146,7 +146,12 @@ impl Panel {
     pub fn load_git_info(path: PathBuf, side: Side, tx: UnboundedSender<Action>) {
         tokio::spawn(async move {
             let (branch, is_dirty) = detect_git_info(&path).await;
-            let _ = tx.send(Action::GitInfoLoaded { side, path, branch, is_dirty });
+            let _ = tx.send(Action::GitInfoLoaded {
+                side,
+                path,
+                branch,
+                is_dirty,
+            });
         });
     }
 
@@ -413,7 +418,12 @@ impl Panel {
             let panel_path = panel_path.clone();
             tokio::spawn(async move {
                 let size = recursive_size(&path).await;
-                let _ = tx.send(Action::DirSizeResult { side, panel_path, name, size });
+                let _ = tx.send(Action::DirSizeResult {
+                    side,
+                    panel_path,
+                    name,
+                    size,
+                });
             });
         }
     }
@@ -502,10 +512,26 @@ impl Panel {
             Constraint::Length(8),
             Constraint::Length(9),
         ];
-        let arrow = if self.sort_order == SortOrder::Asc { "↑" } else { "↓" };
-        let h_name = if self.sort_mode == SortMode::Name { format!("Name{}", arrow) } else { "Name".into() };
-        let h_size = if self.sort_mode == SortMode::Size { format!("Size{}", arrow) } else { "Size".into() };
-        let h_mod  = if self.sort_mode == SortMode::Modified { format!("Date{}", arrow) } else { "Date".into() };
+        let arrow = if self.sort_order == SortOrder::Asc {
+            "↑"
+        } else {
+            "↓"
+        };
+        let h_name = if self.sort_mode == SortMode::Name {
+            format!("Name{}", arrow)
+        } else {
+            "Name".into()
+        };
+        let h_size = if self.sort_mode == SortMode::Size {
+            format!("Size{}", arrow)
+        } else {
+            "Size".into()
+        };
+        let h_mod = if self.sort_mode == SortMode::Modified {
+            format!("Date{}", arrow)
+        } else {
+            "Date".into()
+        };
         let header = Row::new(vec![h_name, h_size, h_mod, "Owner".into()])
             .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
         frame.render_widget(Table::new(std::iter::once(header), widths), header_area);
@@ -513,10 +539,7 @@ impl Panel {
         // Filter bar
         if let Some(farea) = filter_area {
             let filter_text = format!(" Filter: {}_", self.filter);
-            frame.render_widget(
-                Paragraph::new(filter_text).style(palette.filter_bar),
-                farea,
-            );
+            frame.render_widget(Paragraph::new(filter_text).style(palette.filter_bar), farea);
         }
 
         // List
@@ -792,7 +815,11 @@ fn uid_to_name(uid: u32) -> String {
     if ret != 0 || result.is_null() {
         return uid.to_string();
     }
-    unsafe { CStr::from_ptr((*result).pw_name).to_string_lossy().into_owned() }
+    unsafe {
+        CStr::from_ptr((*result).pw_name)
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 // --- Sorting ---
@@ -1026,8 +1053,14 @@ mod tests {
     fn condense_path_shortens_prefix_components() {
         let long = "/home/tommie/projects/my-project";
         let result = condense_path(long, 20);
-        assert!(result.len() <= 20, "path should be condensed; got {result:?}");
-        assert!(result.ends_with("my-project"), "last component must be intact");
+        assert!(
+            result.len() <= 20,
+            "path should be condensed; got {result:?}"
+        );
+        assert!(
+            result.ends_with("my-project"),
+            "last component must be intact"
+        );
     }
 
     #[test]
@@ -1073,7 +1106,10 @@ mod tests {
     #[test]
     fn format_age_zero_returns_spaces() {
         let s = format_age(0);
-        assert!(s.chars().all(|c| c == ' '), "expected all spaces; got {s:?}");
+        assert!(
+            s.chars().all(|c| c == ' '),
+            "expected all spaces; got {s:?}"
+        );
     }
 
     #[test]
@@ -1097,8 +1133,19 @@ mod tests {
 
     #[test]
     fn is_archive_recognises_common_extensions() {
-        for name in &["a.zip", "a.tar.gz", "a.tgz", "a.tar.bz2", "a.tbz2",
-                       "a.tar.xz", "a.txz", "a.7z", "a.rar", "a.tar", "a.gz"] {
+        for name in &[
+            "a.zip",
+            "a.tar.gz",
+            "a.tgz",
+            "a.tar.bz2",
+            "a.tbz2",
+            "a.tar.xz",
+            "a.txz",
+            "a.7z",
+            "a.rar",
+            "a.tar",
+            "a.gz",
+        ] {
             assert!(is_archive(name), "{name} should be recognised as archive");
         }
     }
@@ -1254,7 +1301,10 @@ mod tests {
         p.cursor = 1; // cursor on b.txt — should be ignored
         let targets = p.effective_targets();
         assert_eq!(targets.len(), 2);
-        let names: Vec<&str> = targets.iter().map(|p| p.file_name().unwrap().to_str().unwrap()).collect();
+        let names: Vec<&str> = targets
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(names.contains(&"a.txt"));
         assert!(names.contains(&"c.txt"));
     }
@@ -1339,11 +1389,11 @@ mod tests {
     fn rebuild_view_sort_by_size_desc() {
         let mut p = panel_with(vec![
             entry("small.txt", false, 10, 0),
-            entry("big.txt",   false, 999, 0),
-            entry("mid.txt",   false, 500, 0),
+            entry("big.txt", false, 999, 0),
+            entry("mid.txt", false, 500, 0),
         ]);
         p.cycle_sort_mode(); // Size
-        p.invert_sort();     // Desc
+        p.invert_sort(); // Desc
         let first = &p.entries[p.view_indices[0]];
         assert_eq!(first.name, "big.txt");
     }
@@ -1375,13 +1425,25 @@ mod tests {
         for c in "alph".chars() {
             p.push_filter_char(c);
         }
-        assert_eq!(p.view_indices.len(), 1, "filter 'alph' should match only alpha.txt");
+        assert_eq!(
+            p.view_indices.len(),
+            1,
+            "filter 'alph' should match only alpha.txt"
+        );
         p.pop_filter_char(); // filter back to "alp"
-        assert_eq!(p.view_indices.len(), 1, "filter 'alp' still matches only alpha.txt");
+        assert_eq!(
+            p.view_indices.len(),
+            1,
+            "filter 'alp' still matches only alpha.txt"
+        );
         p.pop_filter_char();
         p.pop_filter_char();
         p.pop_filter_char(); // filter cleared
-        assert_eq!(p.view_indices.len(), 2, "cleared filter should show all entries");
+        assert_eq!(
+            p.view_indices.len(),
+            2,
+            "cleared filter should show all entries"
+        );
     }
 
     #[test]
@@ -1402,7 +1464,10 @@ mod tests {
             .iter()
             .map(|&i| p.entries[i].name.as_str())
             .collect();
-        assert!(visible_names.contains(&".."), "'..' must always remain visible");
+        assert!(
+            visible_names.contains(&".."),
+            "'..' must always remain visible"
+        );
     }
 
     // --- current_entry / cursor_entry ---
@@ -1424,6 +1489,9 @@ mod tests {
     fn cursor_entry_is_alias_for_current_entry() {
         let mut p = panel_with(vec![file("x.txt")]);
         p.cursor = 0;
-        assert_eq!(p.cursor_entry().unwrap().name, p.current_entry().unwrap().name);
+        assert_eq!(
+            p.cursor_entry().unwrap().name,
+            p.current_entry().unwrap().name
+        );
     }
 }
