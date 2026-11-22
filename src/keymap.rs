@@ -4,7 +4,7 @@
 //! into the binary and the user's config (see `specs/002-keyboard-shortcuts/data-model.md`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
 };
 
@@ -348,10 +348,6 @@ impl BindingProblem {
         }
     }
 
-    #[allow(
-        dead_code,
-        reason = "used by the problem report and help screen (User Stories 3, 4)"
-    )]
     pub fn config_unreadable(err: impl fmt::Display) -> Self {
         Self::new(
             ProblemKind::ConfigUnreadable,
@@ -395,7 +391,6 @@ pub struct Keymap {
     prefixes: HashMap<KeyContext, HashSet<KeySeq>>,
     /// Keys in effect per action, display order (see [`key_rank`]).
     keys_for: HashMap<(KeyContext, String), Vec<KeySeq>>,
-    #[allow(dead_code, reason = "shown at startup by User Story 3")]
     pub problems: Vec<BindingProblem>,
 }
 
@@ -418,6 +413,8 @@ fn parse_source(raw: &RawBindings, problems: &mut Vec<BindingProblem>) -> Vec<Bi
         };
         let mut entries: Vec<_> = entries.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
+        // Normalized keys already written in this section, for duplicate detection.
+        let mut seen: HashMap<KeySeq, &str> = HashMap::new();
         for (raw_keys, action_name) in entries {
             let action_name = action_name.as_deref().filter(|n| *n != "Unbind");
             let subject = format!("{raw_keys} → {}", action_name.unwrap_or("null"));
@@ -456,6 +453,25 @@ fn parse_source(raw: &RawBindings, problems: &mut Vec<BindingProblem>) -> Vec<Bi
                     }
                 }
             };
+            if action.is_some() && context.is_text_input() && is_printable(&keys[0]) {
+                problems.push(BindingProblem::new(
+                    ProblemKind::TextInputSteal,
+                    Some(context),
+                    subject,
+                    "would steal typed text",
+                    "entry skipped",
+                ));
+                continue;
+            }
+            if let Some(earlier) = seen.insert(keys.clone(), raw_keys.as_str()) {
+                problems.push(BindingProblem::new(
+                    ProblemKind::DuplicateKey,
+                    Some(context),
+                    format!("{earlier} and {raw_keys}"),
+                    "same key written twice",
+                    "later entry wins",
+                ));
+            }
             out.push(Binding {
                 context,
                 keys,
@@ -465,6 +481,14 @@ fn parse_source(raw: &RawBindings, problems: &mut Vec<BindingProblem>) -> Vec<Bi
         }
     }
     out
+}
+
+/// A key that types text in a text field: a character without Ctrl/Alt/Super (Shift allowed).
+fn is_printable(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(_))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
 
 /// Display order for an action's keys: F-keys, then plain keys, Alt, Ctrl, then sequences.
@@ -484,26 +508,104 @@ fn key_rank(seq: &KeySeq) -> (u8, String) {
     (rank, format!("{seq:?}"))
 }
 
+/// Bindings while merging: context → keys → (action, key string as written).
+type Merged = HashMap<KeyContext, HashMap<KeySeq, (Action, String)>>;
+
+/// Action names that have at least one key, per context.
+fn bound_actions(merged: &Merged) -> HashMap<KeyContext, BTreeSet<String>> {
+    merged
+        .iter()
+        .map(|(ctx, map)| (*ctx, map.values().map(|(a, _)| a.to_string()).collect()))
+        .collect()
+}
+
+/// Checks the merged bindings (research.md R4): prefix ambiguity and actions left without a key.
+fn validate(
+    merged: &Merged,
+    default_actions: &HashMap<KeyContext, BTreeSet<String>>,
+    problems: &mut Vec<BindingProblem>,
+) {
+    let mut contexts: Vec<_> = merged
+        .keys()
+        .chain(default_actions.keys())
+        .copied()
+        .collect();
+    contexts.sort_unstable();
+    contexts.dedup();
+    let empty = HashMap::new();
+    for context in contexts {
+        let map = merged.get(&context).unwrap_or(&empty);
+
+        // A complete binding that is also the start of a longer one: the single key wins.
+        let mut entries: Vec<_> = map.iter().collect();
+        entries.sort_by(|a, b| a.1.1.cmp(&b.1.1));
+        for (keys, (action, raw)) in &entries {
+            let longer: Vec<String> = entries
+                .iter()
+                .filter(|(k, _)| k.len() > keys.len() && k.starts_with(keys))
+                .map(|(_, (a, r))| format!("{r} → {a}"))
+                .collect();
+            if !longer.is_empty() {
+                problems.push(BindingProblem::new(
+                    ProblemKind::PrefixAmbiguity,
+                    Some(context),
+                    format!("{raw} → {action} vs {}", longer.join(", ")),
+                    format!("{raw} is also a prefix"),
+                    "single key wins",
+                ));
+            }
+        }
+
+        // Actions bound by default that the user's config left without any key.
+        let now: BTreeSet<String> = map.values().map(|(a, _)| a.to_string()).collect();
+        for action in default_actions.get(&context).into_iter().flatten() {
+            if now.contains(action) {
+                continue;
+            }
+            let quit = context == KeyContext::Normal && action == "Quit";
+            problems.push(BindingProblem::new(
+                if quit {
+                    ProblemKind::QuitUnreachable
+                } else {
+                    ProblemKind::Unreachable
+                },
+                Some(context),
+                action.clone(),
+                "no key left after overrides",
+                if quit {
+                    "Ctrl+C still quits"
+                } else {
+                    "action unreachable"
+                },
+            ));
+        }
+    }
+}
+
 impl Keymap {
     /// Merges the defaults with the user's bindings. Never fails; problems are collected.
     pub fn build(defaults: &RawBindings, user: &RawBindings) -> Self {
         let mut problems = Vec::new();
-        let mut merged: HashMap<KeyContext, HashMap<KeySeq, Action>> = HashMap::new();
+        let mut merged: Merged = HashMap::new();
 
-        for binding in parse_source(defaults, &mut problems)
-            .into_iter()
-            .chain(parse_source(user, &mut problems))
-        {
-            let map = merged.entry(binding.context).or_default();
-            match binding.action {
-                Some(action) => {
-                    map.insert(binding.keys, action);
-                }
-                None => {
-                    map.remove(&binding.keys);
+        let apply = |merged: &mut Merged, bindings: Vec<Binding>| {
+            for binding in bindings {
+                let map = merged.entry(binding.context).or_default();
+                match binding.action {
+                    Some(action) => {
+                        map.insert(binding.keys, (action, binding.raw));
+                    }
+                    None => {
+                        map.remove(&binding.keys);
+                    }
                 }
             }
-        }
+        };
+        apply(&mut merged, parse_source(defaults, &mut problems));
+        let default_actions = bound_actions(&merged);
+        apply(&mut merged, parse_source(user, &mut problems));
+
+        validate(&merged, &default_actions, &mut problems);
 
         let mut keymap = Self {
             problems,
@@ -511,7 +613,8 @@ impl Keymap {
         };
         for (context, map) in merged {
             let prefixes = keymap.prefixes.entry(context).or_default();
-            for (keys, action) in &map {
+            let mut bindings = HashMap::with_capacity(map.len());
+            for (keys, (action, _)) in map {
                 for len in 1..keys.len() {
                     prefixes.insert(keys[..len].to_vec());
                 }
@@ -520,8 +623,9 @@ impl Keymap {
                     .entry((context, action.to_string()))
                     .or_default()
                     .push(keys.clone());
+                bindings.insert(keys, action);
             }
-            keymap.bindings.insert(context, map);
+            keymap.bindings.insert(context, bindings);
         }
         for keys in keymap.keys_for.values_mut() {
             keys.sort_by_cached_key(key_rank);
@@ -656,7 +760,14 @@ mod tests {
 
     #[test]
     fn user_entry_overrides_default_for_same_key() {
-        let defaults = raw(&[("Normal", &[("<q>", Some("Quit")), ("<f5>", Some("Copy"))])]);
+        let defaults = raw(&[(
+            "Normal",
+            &[
+                ("<q>", Some("Quit")),
+                ("<f10>", Some("Quit")),
+                ("<f5>", Some("Copy")),
+            ],
+        )]);
         let user = raw(&[("Normal", &[("<q>", Some("Copy"))])]);
         let km = Keymap::build(&defaults, &user);
         let chain = [KeyContext::Normal];
@@ -953,6 +1064,173 @@ mod tests {
         assert_eq!(
             km.keys_for(KeyContext::Normal, &Action::Copy),
             &[seq("<f5>"), seq("<alt-5>"), seq("<ctrl-f><5>")]
+        );
+    }
+
+    // --- Problem detection (User Story 3) ---
+
+    fn problems(defaults: &RawBindings, user: &RawBindings) -> Vec<String> {
+        Keymap::build(defaults, user)
+            .problems
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    fn kinds(defaults: &RawBindings, user: &RawBindings) -> Vec<ProblemKind> {
+        Keymap::build(defaults, user)
+            .problems
+            .iter()
+            .map(|p| p.kind)
+            .collect()
+    }
+
+    #[test]
+    fn user_override_of_the_same_key_is_not_a_problem() {
+        let defaults = raw(&[("Normal", &[("<f5>", Some("Copy")), ("<f6>", Some("Move"))])]);
+        let user = raw(&[("Normal", &[("<f5>", Some("Move")), ("<c>", Some("Copy"))])]);
+        assert_eq!(problems(&defaults, &user), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prefix_ambiguity_is_reported_and_single_key_wins() {
+        let defaults = raw(&[("Normal", &[("<g>", Some("NavTop"))])]);
+        let user = raw(&[("Normal", &[("<g><g>", Some("NavBottom"))])]);
+        assert_eq!(
+            problems(&defaults, &user),
+            vec![
+                "[Normal] <g> → NavTop vs <g><g> → NavBottom: <g> is also a prefix — single key wins"
+            ]
+        );
+        let km = Keymap::build(&defaults, &user);
+        assert_eq!(
+            km.resolve(&[KeyContext::Normal], &seq("<g>")),
+            Lookup::Action(Action::NavTop)
+        );
+    }
+
+    #[test]
+    fn action_left_without_keys_is_unreachable() {
+        let defaults = raw(&[(
+            "Normal",
+            &[
+                ("<shift-f6>", Some("Rename")),
+                ("<alt-shift-6>", Some("Rename")),
+            ],
+        )]);
+        let user = raw(&[(
+            "Normal",
+            &[("<shift-f6>", None), ("<alt-shift-6>", Some("Unbind"))],
+        )]);
+        assert_eq!(
+            problems(&defaults, &user),
+            vec!["[Normal] Rename: no key left after overrides — action unreachable"]
+        );
+        // Rebinding the only key to another action also leaves it unreachable.
+        let defaults = raw(&[("Git", &[("<s>", Some("GitStage"))])]);
+        let user = raw(&[("Git", &[("<s>", Some("GitPush"))])]);
+        assert_eq!(kinds(&defaults, &user), vec![ProblemKind::Unreachable]);
+    }
+
+    #[test]
+    fn duplicate_key_after_normalization_later_entry_wins() {
+        let user = raw(&[(
+            "Normal",
+            &[("<minus>", Some("Copy")), ("<hyphen>", Some("Move"))],
+        )]);
+        assert_eq!(
+            problems(&RawBindings::new(), &user),
+            vec!["[Normal] <hyphen> and <minus>: same key written twice — later entry wins"]
+        );
+        // Sorted, `<minus>` comes after `<hyphen>`, so it wins.
+        let km = Keymap::build(&RawBindings::new(), &user);
+        assert_eq!(
+            km.resolve(&[KeyContext::Normal], &seq("<minus>")),
+            Lookup::Action(Action::Copy)
+        );
+        let user = raw(&[(
+            "Normal",
+            &[("<Y>", Some("Copy")), ("<shift-y>", Some("Copy"))],
+        )]);
+        assert_eq!(
+            kinds(&RawBindings::new(), &user),
+            vec![ProblemKind::DuplicateKey]
+        );
+    }
+
+    #[test]
+    fn printable_key_in_text_input_context_is_skipped() {
+        let user = raw(&[(
+            "GitCommit",
+            &[
+                ("<a>", Some("GitCommitSubmit")),
+                ("<A>", Some("GitCommitSubmit")),
+                ("<ctrl-s>", Some("GitCommitSubmit")),
+                ("<alt-a>", Some("GitCommitSubmit")),
+                ("<x>", None),
+            ],
+        )]);
+        assert_eq!(
+            problems(&RawBindings::new(), &user),
+            vec![
+                "[GitCommit] <A> → GitCommitSubmit: would steal typed text — entry skipped",
+                "[GitCommit] <a> → GitCommitSubmit: would steal typed text — entry skipped",
+            ]
+        );
+        let km = Keymap::build(&RawBindings::new(), &user);
+        let chain = [KeyContext::GitCommit];
+        assert_eq!(km.resolve(&chain, &seq("<a>")), Lookup::None);
+        assert_eq!(
+            km.resolve(&chain, &seq("<ctrl-s>")),
+            Lookup::Action(Action::GitCommitSubmit)
+        );
+        // Not a text-input context: plain letters are fine.
+        let user = raw(&[("DialogConfirm", &[("<j>", Some("DialogConfirm"))])]);
+        assert_eq!(problems(&RawBindings::new(), &user), Vec::<String>::new());
+    }
+
+    #[test]
+    fn quit_unreachable_is_a_warning() {
+        let defaults = raw(&[("Normal", &[("<f10>", Some("Quit"))])]);
+        let user = raw(&[("Normal", &[("<f10>", None)])]);
+        assert_eq!(
+            problems(&defaults, &user),
+            vec!["[Normal] Quit: no key left after overrides — Ctrl+C still quits"]
+        );
+        assert_eq!(kinds(&defaults, &user), vec![ProblemKind::QuitUnreachable]);
+    }
+
+    #[test]
+    fn unknown_action_and_unparseable_key_messages() {
+        let user = raw(&[(
+            "Git",
+            &[
+                ("<ctrl-q>", Some("GitPushh")),
+                ("<alt-x5>", Some("GitPush")),
+            ],
+        )]);
+        assert_eq!(
+            problems(&RawBindings::new(), &user),
+            vec![
+                "[Git] <alt-x5> → GitPush: unparseable key — entry skipped",
+                "[Git] <ctrl-q> → GitPushh: unknown action — entry skipped",
+            ]
+        );
+    }
+
+    #[test]
+    fn config_unreadable_message() {
+        assert_eq!(
+            BindingProblem::config_unreadable("bad json").to_string(),
+            "config file: could not be read (bad json) — defaults used"
+        );
+    }
+
+    #[test]
+    fn shipped_defaults_have_no_problems_in_any_context() {
+        assert_eq!(
+            problems(&crate::config::default_keybindings(), &RawBindings::new()),
+            Vec::<String>::new()
         );
     }
 }

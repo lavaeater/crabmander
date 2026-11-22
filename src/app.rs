@@ -137,7 +137,7 @@ impl App {
         });
         let palette = Palette::from(&opaline_theme);
 
-        Ok(Self {
+        let mut app = Self {
             config,
             palette,
             tick_rate,
@@ -175,7 +175,29 @@ impl App {
             pending_since: None,
             action_tx,
             action_rx,
-        })
+        };
+        app.report_keybinding_problems();
+        Ok(app)
+    }
+
+    /// Logs keybinding problems and lists them in a dialog before anything else is shown
+    /// (contracts/ui-hints.md "Startup problem report").
+    fn report_keybinding_problems(&mut self) {
+        let lines: Vec<String> = self
+            .config
+            .keymap
+            .problems
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        for line in &lines {
+            tracing::warn!("keybinding problem: {line}");
+        }
+        let title = format!("Keybinding problems ({})", lines.len());
+        self.open_dialog(DialogState::error_list(title, lines));
     }
 
     pub async fn run(&mut self) -> color_eyre::Result<()> {

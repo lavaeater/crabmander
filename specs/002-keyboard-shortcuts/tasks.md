@@ -135,14 +135,14 @@ shows "Keybinding problems (5)" with one line each; the log has the same lines.
 
 ### Tests for User Story 3
 
-- [ ] T029 [P] [US3] Tests in src/keymap.rs, one per `ProblemKind` (data-model.md: BindingProblem.kind): PrefixAmbiguity (`<g>` + `<g><g>`), Unreachable (user removes all keys for Rename), DuplicateKey (`<minus>` and `<hyphen>` in one source), TextInputSteal (`<a>` in GitCommit), QuitUnreachable, UnknownAction, UnparseableKey; each with the expected `resolution` text; plus a user override of the same key is NOT a problem
-- [ ] T030 [P] [US3] Test in src/keymap.rs: the shipped defaults produce zero problems in every context (FR-006)
+- [X] T029 [P] [US3] Tests in src/keymap.rs, one per `ProblemKind` (data-model.md: BindingProblem.kind): PrefixAmbiguity (`<g>` + `<g><g>`), Unreachable (user removes all keys for Rename), DuplicateKey (`<minus>` and `<hyphen>` in one source), TextInputSteal (`<a>` in GitCommit), QuitUnreachable, UnknownAction, UnparseableKey; each with the expected `resolution` text; plus a user override of the same key is NOT a problem
+- [X] T030 [P] [US3] Test in src/keymap.rs: the shipped defaults produce zero problems in every context (FR-006)
 
 ### Implementation for User Story 3
 
-- [ ] T031 [US3] Add the validation pass to `Keymap::build` in src/keymap.rs implementing R4: prefix ambiguity (single key wins), unreachable action (default-bound action with no key left), duplicate after normalization (later wins), text-input steal (entry skipped), Quit unreachable in Normal (warning only)
-- [ ] T032 [US3] Turn config-level failures (unreadable/malformed user config file) into a `ConfigUnreadable` problem with resolution "defaults used" in src/config.rs instead of failing startup (FR-009)
-- [ ] T033 [US3] In src/app.rs at startup: log every problem with `warn!` and, if any exist, open `DialogState::ErrorList` titled "Keybinding problems (N)" with one `Display` line per problem before any other dialog (contracts/ui-hints.md "Startup problem report"); dismiss with Enter/Esc
+- [X] T031 [US3] Add the validation pass to `Keymap::build` in src/keymap.rs implementing R4: prefix ambiguity (single key wins), unreachable action (default-bound action with no key left), duplicate after normalization (later wins), text-input steal (entry skipped), Quit unreachable in Normal (warning only)
+- [X] T032 [US3] Turn config-level failures (unreadable/malformed user config file) into a `ConfigUnreadable` problem with resolution "defaults used" in src/config.rs instead of failing startup (FR-009)
+- [X] T033 [US3] In src/app.rs at startup: log every problem with `warn!` and, if any exist, open `DialogState::ErrorList` titled "Keybinding problems (N)" with one `Display` line per problem before any other dialog (contracts/ui-hints.md "Startup problem report"); dismiss with Enter/Esc
 
 **Checkpoint**: Config mistakes are visible and never block startup.
 

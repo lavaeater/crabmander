@@ -11,7 +11,7 @@ use tracing::error;
 
 use crate::{
     app::Mode,
-    keymap::{Keymap, RawBindings},
+    keymap::{BindingProblem, Keymap, RawBindings},
 };
 
 const CONFIG: &str = include_str!("../.config/config.json5");
@@ -105,9 +105,27 @@ impl Config {
             error!("No configuration file found. Application may not behave as expected");
         }
 
-        let mut cfg: Self = builder.build()?.try_deserialize()?;
+        // A broken user config must not stop startup (FR-009): use the defaults and report it.
+        let (mut cfg, unreadable) = match builder.build().and_then(config::Config::try_deserialize)
+        {
+            Ok(cfg) => (cfg, None),
+            Err(err) => {
+                error!("could not read the config file, using defaults: {err}");
+                let cfg = Self {
+                    app: AppConfig {
+                        data_dir,
+                        config_dir,
+                    },
+                    keybindings: RawBindings::new(),
+                    ..default_config.clone()
+                };
+                (cfg, Some(BindingProblem::config_unreadable(err)))
+            }
+        };
 
-        cfg.keymap = Arc::new(Keymap::build(&default_config.keybindings, &cfg.keybindings));
+        let mut keymap = Keymap::build(&default_config.keybindings, &cfg.keybindings);
+        keymap.problems.splice(0..0, unreadable);
+        cfg.keymap = Arc::new(keymap);
         for (mode, default_styles) in &default_config.styles.0 {
             let user_styles = cfg.styles.0.entry(*mode).or_default();
             for (style_key, style) in default_styles {
