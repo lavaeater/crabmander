@@ -229,6 +229,11 @@ impl Tui {
         Ok(())
     }
 
+    /// Whether the kitty keyboard protocol is active, so Alt+Shift+digit is reported as such.
+    pub const fn keyboard_enhanced(&self) -> bool {
+        self.keyboard_enhanced
+    }
+
     pub fn cancel(&self) {
         self.cancellation_token.cancel();
     }

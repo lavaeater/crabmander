@@ -26,6 +26,7 @@
       // Marking
       "<space>": "ToggleMark",
       "<insert>": "ToggleMark",
+      "<*>": "ToggleMarkAll",
 
       // Operations. Every F-key has two fallbacks for terminals and desktops that
       // swallow F-keys: Alt + the same digit (F10 = Alt+0, F11 = Alt+Minus, F12 = Alt+=;
@@ -51,6 +52,7 @@
       // Modes
       "<ctrl-g>": "EnterGitMode",
       "<ctrl-b>": "EnterCargoMode",
+      "<?>": "Help",
     },
 
     // F1–F7 have the same Alt+digit and Ctrl+F digit fallbacks as in Normal.
@@ -81,6 +83,7 @@
       "<R>": "GitTabReflog",
       "<d>": "GitTabDiff",
       "<B>": "GitTabBlame",
+      "<?>": "Help",
     },
 
     // Commit message editor: every other key is text.
@@ -96,6 +99,7 @@
       "<down>": "GitBranchNavDown",  "<j>": "GitBranchNavDown",
       "<enter>": "GitBranchConfirm",
       "<n>": "GitNewBranch",
+      "<?>": "Help",
     },
 
     "GitTag": {
@@ -104,6 +108,7 @@
       "<down>": "GitTagNavDown",     "<j>": "GitTagNavDown",
       "<enter>": "GitTagConfirm",
       "<d>": "GitTagDelete",
+      "<?>": "Help",
     },
 
     // Git repositories list (F12)
@@ -113,6 +118,7 @@
       "<down>": "GlobalGitNavDown",  "<j>": "GlobalGitNavDown",
       "<enter>": "GlobalGitSelect",
       "<d>": "GlobalGitRemove",      "<delete>": "GlobalGitRemove",
+      "<?>": "Help",
     },
 
     "Cargo": {
@@ -120,6 +126,7 @@
       "<up>": "CargoNavUp",          "<k>": "CargoNavUp",
       "<down>": "CargoNavDown",      "<j>": "CargoNavDown",
       "<enter>": "CargoRunSelected",
+      "<?>": "Help",
     },
 
     // All dialogs. Typed characters go to the dialog's text field.
@@ -142,6 +149,15 @@
     "QuickCd": {
       "<tab>": "QuickCdComplete",
       "<backspace>": "QuickCdBackspace",
+    },
+
+    // The `?` help overlay.
+    "Help": {
+      "<esc>": "HelpClose",          "<?>": "HelpClose",            "<q>": "HelpClose",
+      "<up>": "HelpScrollUp",        "<k>": "HelpScrollUp",
+      "<down>": "HelpScrollDown",    "<j>": "HelpScrollDown",
+      "<pageup>": "HelpPageUp",
+      "<pagedown>": "HelpPageDown",
     },
   }
 }

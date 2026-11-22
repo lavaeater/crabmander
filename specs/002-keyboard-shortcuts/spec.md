@@ -4,7 +4,7 @@
 
 **Created**: 2026-11-20
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: User description: "Keyboard shortcut overhaul: make every Crabmander shortcut reliable,
 configurable and discoverable. Today only Normal mode keybindings live in the config file; Git, Git

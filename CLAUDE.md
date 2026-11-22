@@ -29,9 +29,11 @@ The app follows a message-passing event loop pattern:
 - **`action.rs`** — Defines the `Action` enum: the single vocabulary of commands that flow through the app (`Quit`, `Tick`, `Render`, `Resize`, `Suspend`, `Resume`, `ClearScreen`, `Error`, `Help`).
 - **`app.rs`** — The main event loop. Owns a `Vec<Box<dyn Component>>`, reads `Event`s from `Tui`, translates them into `Action`s via an `mpsc::unbounded_channel`, dispatches actions to all components, and renders each frame.
 - **`components.rs`** — Defines the `Component` trait. Implementors receive events/actions and produce `Action`s in return. `draw()` and `update()` are the required methods; others have default no-op implementations.
-- **`config.rs`** — Loads configuration from `~/.config/crabmander/` (XDG). Falls back to `.config/config.json5` baked in at compile time via `include_str!`. Supports json5, json, yaml, toml, and ini. Keybindings are per-`Mode` maps of key sequence strings to `Action`s. Styles are per-`Mode` maps of string keys to human-readable color/modifier strings (e.g. `"bold red on blue"`).
+- **`config.rs`** — Loads configuration from `~/.config/crabmander/` (XDG). Falls back to `.config/config.json5` baked in at compile time via `include_str!`. Supports json5, json, yaml, toml, and ini. An unreadable user config falls back to the defaults (reported, never fatal). Keybindings are read raw (`RawBindings`: section → key string → action name or `null`) and resolved into `Config::keymap`. Styles are per-`Mode` maps of string keys to human-readable color/modifier strings (e.g. `"bold red on blue"`).
+- **`keymap.rs`** — Terminal-free keybinding logic. `KeyContext` names a config section (`Normal`, `Git`, `GitCommit`, `GitBranch`, `GitTag`, `GlobalGit`, `Cargo`, `Dialog`, `DialogConfirm`, `QuickCd`, `Help`); `KeyContext::chain(mode, dialog)` gives the contexts searched for a key, in order (`QuickCd` and `DialogConfirm` fall back to `Dialog`). `CATALOG` lists every bindable action per context with its function-bar label/priority and help text — add an entry when adding a bindable action. `Keymap::build(defaults, user)` merges the shipped defaults with the user's entries (`null`/`"Unbind"` removes), validates them into `BindingProblem`s (shown at startup), and `resolve` / `keys_in_chain` answer lookups. Incoming keys pass through `normalize` first.
 - **`cli.rs`** — CLI argument parsing via Clap (tick rate, frame rate flags).
-- **`app::Mode`** — An enum that scopes keybindings and styles. Currently only `Home`.
+- **`app::Mode`** — What the app is doing (`Normal`, `Dialog`, `Git`, `GitCommit`, `GitBranch`, `GitTag`, `GlobalGit`, `Cargo`, `Help`). Mapped to key contexts by `KeyContext::chain`. Key handling (`App::handle_key_event`): Ctrl+C always quits; in text-input contexts printable keys are text; while the panel filter has text, printable keys extend it; otherwise the keymap is consulted, with multi-key sequences buffered for 1.5 s.
+- **`components/func_bar.rs`, `components/help.rs`** — The bottom bar and the `?` help overlay, both generated from the keymap and catalog, so they always show the keys in effect.
 
 ### Adding a new component
 
@@ -43,7 +45,8 @@ The app follows a message-passing event loop pattern:
 
 1. Add variant to `Action` in `action.rs`.
 2. Handle it in `App::handle_actions()` and/or in relevant `Component::update()` implementations.
+3. If users should be able to bind it, add it to `CATALOG` in `keymap.rs` for each context it applies to, and give it default keys in `.config/config.json5`. The test `shipped_defaults_have_no_problems_in_any_context` checks the defaults.
 
 ## Configuration
 
-User config lives in `$CRABMANDER_CONFIG` or the XDG config dir (`~/.config/crabmander/`). Data dir is `$CRABMANDER_DATA` or the XDG data dir. Key sequences use the format `<ctrl-a>`, `<shift-esc>`, chained as `<g><g>` for multi-key combos.
+User config lives in `$CRABMANDER_CONFIG` or the XDG config dir (`~/.config/crabmander/`). Data dir is `$CRABMANDER_DATA` or the XDG data dir. Key sequences use the format `<ctrl-a>`, `<shift-esc>`, chained as `<g><g>` for multi-key combos. Keybindings are per key context (see `keymap.rs`); user entries override the defaults key by key, and `null` removes a default.

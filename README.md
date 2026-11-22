@@ -58,7 +58,11 @@ Crabmander has several operating modes:
 | **Git**           | Git client view — staging, log, graph, reflog, diff, blame tabs                    |
 | **Git Commit**    | Multi-line commit message editor (entered from Git mode)                           |
 | **Git Branch**    | Branch list / switcher (entered from Git mode with `F6` / `b`)                    |
-| **Git Repos**     | Global bookmarked git repo list (`F12` / `Shift+G` from Normal mode)              |
+| **Git Repos**     | Global bookmarked git repo list (`F12` / `Alt+=` from Normal mode)                |
+
+Press **`?`** in any mode (except while typing text) for a help screen listing every key in
+effect for that mode, including your own overrides. The function bar at the bottom is also built
+from the keys in effect.
 
 ---
 
@@ -94,27 +98,54 @@ marked count and cumulative size.
 
 ### Function keys
 
-Each F-key has a `Shift+letter` fallback for terminals or compositors that intercept
-function keys (e.g. COSMIC desktop).
+Every F-key has two fallbacks for terminals or desktops that intercept function keys
+(e.g. COSMIC):
 
-| Key            | Fallback  | Action                                                                          |
-|----------------|-----------|---------------------------------------------------------------------------------|
-| `F1`           |           | **Quick CD** — incremental directory navigator (see below)                      |
-| `Shift+F1`     |           | **Recent dirs** — jump to a previously visited directory                        |
-| `F2`           | `Shift+X` | **Context menu** — file-type-aware actions (see below)                          |
-| `F3`           | `Shift+E` | **View** — open the cursor file in nano                                         |
-| `F4`           | `Shift+Z` | **Sizes** — recursively calculate directory sizes, auto-sorts by size           |
-| `F5`           | `Shift+Y` | **Copy** — copy marked/cursor files to the other panel's directory              |
-| `F6`           | `Shift+R` | **Move** — move marked/cursor files to the other panel's directory              |
-| `F7`           | `Shift+K` | **MkDir** — create a new directory in the active panel                          |
-| `F8`           | `Shift+D` | **Delete** — delete marked/cursor files (with confirmation)                     |
-| `F9`           | `Shift+S` | **Sort** — cycle sort column: Name → Size → Modified                            |
-| `Shift+F9`     |           | **Invert sort** — toggle ascending ↑ / descending ↓                             |
-| `F10` / `q`    |           | Quit                                                                            |
-| `F11`          | `Shift+T` | **Select theme** — live-preview built-in color themes                           |
-| `F12`          | `Shift+G` | **Git Repos** — global bookmarked git repository list (see below)               |
-| `Ctrl+G`       |           | **Enter Git mode** — opens git client for the active repo, bookmarks it         |
-| `Ctrl+Z`       |           | Suspend to background                                                           |
+- **Alt + the same digit**: `Alt+5` = `F5`, `Alt+0` = `F10`, `Alt+-` = `F11`, `Alt+=` = `F12`.
+  Shift+F-keys are `Alt+Shift+digit` (`Alt+Shift+6` = `Shift+F6`).
+- **The `Ctrl+F` leader**, then the digit: `Ctrl+F 5` = `F5`, `Ctrl+F -` = `F11`,
+  `Ctrl+F =` = `F12`, and `Ctrl+F s 6` = `Shift+F6`. This works in every terminal and keyboard
+  layout, including ones that use Alt+digit themselves (e.g. Tilix).
+
+| Key            | Alt fallback  | Action                                                                      |
+|----------------|---------------|-----------------------------------------------------------------------------|
+| `F1`           | `Alt+1`       | **Quick CD** — incremental directory navigator (see below)                  |
+| `Shift+F1`     | `Alt+Shift+1` | **Recent dirs** — jump to a previously visited directory                    |
+| `F2`           | `Alt+2`       | **Context menu** — file-type-aware actions (see below)                      |
+| `Shift+F2`     | `Alt+Shift+2` | **User commands**                                                           |
+| `F3`           | `Alt+3`       | **View** — open the cursor file in nano                                     |
+| `F4`           | `Alt+4`       | **Sizes** — recursively calculate directory sizes, auto-sorts by size       |
+| `F5`           | `Alt+5`       | **Copy** — copy marked/cursor files to the other panel's directory          |
+| `F6`           | `Alt+6`       | **Move** — move marked/cursor files to the other panel's directory          |
+| `Shift+F6`     | `Alt+Shift+6` | **Rename** in place                                                         |
+| `F7`           | `Alt+7`       | **MkDir** — create a new directory in the active panel                      |
+| `F8`           | `Alt+8`       | **Delete** — delete marked/cursor files (with confirmation)                 |
+| `F9`           | `Alt+9`       | **Sort** — cycle sort column: Name → Size → Modified                        |
+| `Shift+F9`     | `Alt+Shift+9` | **Invert sort** — toggle ascending ↑ / descending ↓                         |
+| `F10` / `q`    | `Alt+0`       | Quit (`Ctrl+C` always quits too)                                            |
+| `F11`          | `Alt+-`       | **Select theme** — live-preview built-in color themes                       |
+| `F12`          | `Alt+=`       | **Git Repos** — global bookmarked git repository list (see below)           |
+| `Ctrl+G`       |               | **Enter Git mode** — opens git client for the active repo, bookmarks it     |
+| `Ctrl+B`       |               | **Enter Cargo mode** — cargo commands for the active project                |
+| `Ctrl+Z`       |               | Suspend to background                                                       |
+| `?`            |               | Help — every key of the current mode                                        |
+
+> **Alt+Shift+digit on older terminals.** Terminals without the kitty keyboard protocol
+> (e.g. VTE-based ones like GNOME Terminal and Tilix) send Alt+Shift+6 as Alt plus the symbol
+> your layout puts on Shift+6 (`&` on Swedish, `^` on US), so `Alt+Shift+6` does not match. Use
+> `Ctrl+F s 6`, or bind the symbol yourself: `"<alt-&>": "Rename"`. The help screen tells you
+> when your terminal is one of these.
+
+The `Shift+letter` fallbacks of earlier versions (`Shift+Y` copy, `Shift+R` move, …) are gone.
+To get them back, add this to your config:
+
+```json5
+"keybindings": { "Normal": {
+  "<shift-x>": "ContextMenu", "<shift-e>": "View", "<shift-z>": "CalcSizes",
+  "<shift-y>": "Copy", "<shift-r>": "Move", "<shift-k>": "Mkdir", "<shift-d>": "Delete",
+  "<shift-s>": "CycleSortMode", "<shift-t>": "SelectTheme", "<shift-g>": "GlobalGitView",
+} }
+```
 
 ### Quick CD (F1)
 
@@ -184,7 +215,7 @@ The active sort column is indicated by an arrow in the column header
 
 ## Keyboard reference — Git Repos (global git view)
 
-Open with `F12` / `Shift+G` from Normal mode. Shows all git repositories you have
+Open with `F12` / `Alt+=` from Normal mode. Shows all git repositories you have
 previously visited via `Ctrl+G`, most-recently-used first. Each row shows the path,
 current branch, and dirty status.
 
@@ -252,6 +283,8 @@ All tabs: `↑`/`k` up, `↓`/`j` down, `PgUp`/`PgDn` page scroll.
 | `r`              | Reload git status                                                   |
 | `Esc` / `q`      | Exit Git mode (or back to Git Repos if entered from there)          |
 
+`F1`–`F7` have the same `Alt+digit` and `Ctrl+F digit` fallbacks as in Normal mode.
+
 ### Commit editor (Git Commit mode)
 
 A full-screen multi-line text editor for writing commit messages.
@@ -302,14 +335,49 @@ CRABMANDER_CONFIG=~/.config/crabmander crabmander
 CRABMANDER_DATA=~/.local/share/crabmander crabmander
 ```
 
+### Keybindings
+
+Keybindings live under `keybindings`, in one section per mode. Your entries are merged over the
+built-in defaults ([`.config/config.json5`](.config/config.json5) lists them all): an entry for a
+key that is already bound replaces it, and `null` removes it.
+
+```json5
+"keybindings": {
+  "Normal": {
+    "<c>": "Copy",        // add a key
+    "<q>": null,          // remove a default key
+  },
+  "Git": { "<ctrl-p>": "GitPush" },
+}
+```
+
+Sections: `Normal`, `Git`, `GitCommit` (commit editor), `GitBranch`, `GitTag`, `GlobalGit`
+(Git Repos), `Cargo`, `Dialog` (all dialogs), `DialogConfirm` (yes/no questions, falls back to
+`Dialog`), `QuickCd` (falls back to `Dialog`) and `Help`. Formats without `null` (TOML, INI) use
+the string `"Unbind"` instead.
+
+Mistakes never stop Crabmander from starting. Unknown actions, unparseable keys, a key that is
+both a binding and the start of a longer sequence, an action left without any key, or a printable
+key bound in a text field are listed in a "Keybinding problems" dialog at startup (and in the
+log), and Crabmander says what it did about each one. An unreadable config file means the
+defaults are used. `Ctrl+C` always quits.
+
 ### Key sequence syntax
 
-| Syntax       | Meaning               |
-|--------------|-----------------------|
-| `<q>`        | The `q` key           |
-| `<ctrl-a>`   | Ctrl+A                |
-| `<shift-f9>` | Shift+F9              |
-| `<g><g>`     | Two-key sequence `gg` |
+| Syntax            | Meaning                                         |
+|-------------------|-------------------------------------------------|
+| `<q>`             | The `q` key                                     |
+| `<Y>`             | Shift+Y (same as `<shift-y>`)                   |
+| `<ctrl-a>`        | Ctrl+A                                          |
+| `<shift-f9>`      | Shift+F9                                        |
+| `<alt-shift-6>`   | Alt+Shift+6                                     |
+| `<alt-minus>`     | Alt+- (also `<alt-hyphen>`); `<alt-equals>` = Alt+= |
+| `<?>`, `<*>`      | Any single character                            |
+| `<g><g>`          | Two-key sequence `gg`                           |
+| `<ctrl-f><s><6>`  | Ctrl+F, then `s`, then `6`                      |
+
+Key names: `esc enter left right up down home end pageup pagedown tab backtab backspace delete
+insert space f1`…`f12 minus hyphen equals`. Modifiers: `ctrl-`, `alt-`, `shift-`.
 
 ### Themes
 

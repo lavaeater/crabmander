@@ -158,17 +158,17 @@ drop whole.
 
 ### Tests for User Story 4
 
-- [ ] T034 [P] [US4] Tests in src/keymap.rs for key display names: compact (`F5`, `⇧F6`, `Alt+5`, `Alt+⇧6`, `^B`, `Esc`, `Spc`, `Tab`, `PgUp`) and full notation for help
-- [ ] T035 [P] [US4] Tests in src/components/func_bar.rs: entries in catalog priority order, up to two keys F-key first, unbound actions hidden, lowest-priority entries dropped whole when narrow, `? Help` kept last when it fits
+- [X] T034 [P] [US4] Tests in src/keymap.rs for key display names: compact (`F5`, `⇧F6`, `Alt+5`, `Alt+⇧6`, `^B`, `Esc`, `Spc`, `Tab`, `PgUp`) and full notation for help
+- [X] T035 [P] [US4] Tests in src/components/func_bar.rs: entries in catalog priority order, up to two keys F-key first, unbound actions hidden, lowest-priority entries dropped whole when narrow, `? Help` kept last when it fits
 
 ### Implementation for User Story 4
 
-- [ ] T036 [US4] Add compact and full key display functions to src/keymap.rs (contracts/ui-hints.md "Function bar" key names)
-- [ ] T037 [US4] Rewrite src/components/func_bar.rs to build entries from the `Keymap` and catalog for the active context (data-model.md: ActionSpec.label, ActionSpec.bar_priority) with width fitting; delete `NORMAL_KEYS`, `GIT_KEYS`, `CARGO_KEYS`, `GLOBAL_GIT_KEYS`; pass the keymap/context in from src/app.rs
-- [ ] T038 [US4] Expose from src/tui.rs whether the kitty keyboard enhancement is active, and store it on `App` in src/app.rs
-- [ ] T039 [P] [US4] Create src/components/help.rs and re-export from src/components.rs: overlay titled "Keys — <context> mode", actions of the context chain grouped by `ActionSpec.group` (data-model.md: ActionSpec.group, ActionSpec.description), all keys in full notation or "(unbound)", scroll state, and the legacy-terminal footer note when the enhancement is off (contracts/ui-hints.md "Help screen")
-- [ ] T040 [US4] Add `Mode::Help` in src/app.rs: `Action::Help` from a non-text context remembers the prior mode and opens help; `HelpClose` returns to it unchanged; `HelpScrollUp`/`HelpScrollDown` and page keys scroll; render the overlay last (data-model.md "State transitions")
-- [ ] T041 [US4] Add the `Help` context defaults and `<?>` → Help in every non-text context, and `<*>` → ToggleMarkAll in Normal, in .config/config.json5 (contracts/keybindings-config.md)
+- [X] T036 [US4] Add compact and full key display functions to src/keymap.rs (contracts/ui-hints.md "Function bar" key names)
+- [X] T037 [US4] Rewrite src/components/func_bar.rs to build entries from the `Keymap` and catalog for the active context (data-model.md: ActionSpec.label, ActionSpec.bar_priority) with width fitting; delete `NORMAL_KEYS`, `GIT_KEYS`, `CARGO_KEYS`, `GLOBAL_GIT_KEYS`; pass the keymap/context in from src/app.rs
+- [X] T038 [US4] Expose from src/tui.rs whether the kitty keyboard enhancement is active, and store it on `App` in src/app.rs
+- [X] T039 [P] [US4] Create src/components/help.rs and re-export from src/components.rs: overlay titled "Keys — <context> mode", actions of the context chain grouped by `ActionSpec.group` (data-model.md: ActionSpec.group, ActionSpec.description), all keys in full notation or "(unbound)", scroll state, and the legacy-terminal footer note when the enhancement is off (contracts/ui-hints.md "Help screen")
+- [X] T040 [US4] Add `Mode::Help` in src/app.rs: `Action::Help` from a non-text context remembers the prior mode and opens help; `HelpClose` returns to it unchanged; `HelpScrollUp`/`HelpScrollDown` and page keys scroll; render the overlay last (data-model.md "State transitions")
+- [X] T041 [US4] Add the `Help` context defaults and `<?>` → Help in every non-text context, and `<*>` → ToggleMarkAll in Normal, in .config/config.json5 (contracts/keybindings-config.md)
 
 **Checkpoint**: All four stories work; hints always match real bindings.
 
@@ -176,11 +176,11 @@ drop whole.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T042 [P] Update README.md keyboard reference (FR-014): Alt+digit scheme, per-context config sections, `null`/`Unbind` removal, `?` help, removal of the Shift-letter fallbacks with the restore snippet from contracts/keybindings-config.md, the legacy-terminal Alt+Shift+digit note and how to bind the layout symbol instead
-- [ ] T043 [P] Update CLAUDE.md architecture section: `keymap.rs`, `KeyContext` and its chain, where defaults live, and correct the stale "Mode: currently only Home" line
-- [ ] T044 Remove the temporary raw-key `trace!` from T001 in src/tui.rs if it is too noisy, or keep it at trace level with a comment
-- [ ] T045 Run the quality gates (fmt, clippy `-D warnings`, `cargo test --locked --all-features`) and the full manual run-through in specs/002-keyboard-shortcuts/quickstart.md, recording the terminal/layout matrix results
-- [ ] T046 Update the header of specs/002-keyboard-shortcuts/spec.md (branch `002-keyboard-shortcuts`, status Implemented)
+- [X] T042 [P] Update README.md keyboard reference (FR-014): Alt+digit scheme, per-context config sections, `null`/`Unbind` removal, `?` help, removal of the Shift-letter fallbacks with the restore snippet from contracts/keybindings-config.md, the legacy-terminal Alt+Shift+digit note and how to bind the layout symbol instead
+- [X] T043 [P] Update CLAUDE.md architecture section: `keymap.rs`, `KeyContext` and its chain, where defaults live, and correct the stale "Mode: currently only Home" line
+- [X] T044 Remove the temporary raw-key `trace!` from T001 in src/tui.rs if it is too noisy, or keep it at trace level with a comment
+- [X] T045 Run the quality gates (fmt, clippy `-D warnings`, `cargo test --locked --all-features`) and the full manual run-through in specs/002-keyboard-shortcuts/quickstart.md, recording the terminal/layout matrix results
+- [X] T046 Update the header of specs/002-keyboard-shortcuts/spec.md (branch `002-keyboard-shortcuts`, status Implemented)
 
 ---
 

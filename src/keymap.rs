@@ -56,6 +56,7 @@ impl KeyContext {
             Mode::GitTag => &[Self::GitTag],
             Mode::GlobalGit => &[Self::GlobalGit],
             Mode::Cargo => &[Self::Cargo],
+            Mode::Help => &[Self::Help],
             Mode::Dialog => match dialog {
                 Some(DialogState::QuickCd { .. }) => &[Self::QuickCd, Self::Dialog],
                 Some(DialogState::Confirm { .. }) => &[Self::DialogConfirm, Self::Dialog],
@@ -106,14 +107,160 @@ pub fn parse_seq(raw: &str) -> Result<KeySeq, String> {
     Ok(seq.into_iter().map(normalize).collect())
 }
 
+// --- Display names ---
+
+/// How a key is written on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyStyle {
+    /// Function bar: `F5`, `⇧F6`, `Alt+⇧6`, `^B`, `Spc`, `PgUp`, `^F 5`.
+    Compact,
+    /// Help screen: `Shift+F6`, `Alt+Shift+6`, `Ctrl+B`, `Space`, `Page Up`, `Ctrl+F 5`.
+    Full,
+}
+
+fn code_name(code: KeyCode, style: KeyStyle) -> String {
+    let compact = style == KeyStyle::Compact;
+    let name = match code {
+        KeyCode::F(n) => return format!("F{n}"),
+        KeyCode::Char(' ') => {
+            if compact {
+                "Spc"
+            } else {
+                "Space"
+            }
+        }
+        KeyCode::Char(c) => return c.to_string(),
+        KeyCode::Esc => "Esc",
+        KeyCode::Enter => "Enter",
+        KeyCode::Tab | KeyCode::BackTab => "Tab",
+        KeyCode::Backspace => {
+            if compact {
+                "BkSp"
+            } else {
+                "Backspace"
+            }
+        }
+        KeyCode::Delete => {
+            if compact {
+                "Del"
+            } else {
+                "Delete"
+            }
+        }
+        KeyCode::Insert => {
+            if compact {
+                "Ins"
+            } else {
+                "Insert"
+            }
+        }
+        KeyCode::Home => "Home",
+        KeyCode::End => "End",
+        KeyCode::PageUp => {
+            if compact {
+                "PgUp"
+            } else {
+                "Page Up"
+            }
+        }
+        KeyCode::PageDown => {
+            if compact {
+                "PgDn"
+            } else {
+                "Page Down"
+            }
+        }
+        KeyCode::Up => {
+            if compact {
+                "↑"
+            } else {
+                "Up"
+            }
+        }
+        KeyCode::Down => {
+            if compact {
+                "↓"
+            } else {
+                "Down"
+            }
+        }
+        KeyCode::Left => {
+            if compact {
+                "←"
+            } else {
+                "Left"
+            }
+        }
+        KeyCode::Right => {
+            if compact {
+                "→"
+            } else {
+                "Right"
+            }
+        }
+        other => return format!("{other:?}"),
+    };
+    name.to_owned()
+}
+
+/// One key as shown on screen. Letters show Shift through their case (`Y`), except with Ctrl,
+/// where the letter is always upper case (`^B`, `Ctrl+Shift+B`).
+pub fn key_name(key: &KeyEvent, style: KeyStyle) -> String {
+    let mods = key.modifiers;
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let letter = matches!(key.code, KeyCode::Char(c) if c.is_alphabetic());
+    let shift = mods.contains(KeyModifiers::SHIFT) && (ctrl || !letter);
+    let code = match key.code {
+        KeyCode::Char(c) if letter && ctrl => {
+            code_name(KeyCode::Char(c.to_ascii_uppercase()), style)
+        }
+        code => code_name(code, style),
+    };
+    let mut out = String::new();
+    match style {
+        KeyStyle::Compact => {
+            if ctrl {
+                out.push('^');
+            }
+            if mods.contains(KeyModifiers::SUPER) {
+                out.push_str("Super+");
+            }
+            if mods.contains(KeyModifiers::ALT) {
+                out.push_str("Alt+");
+            }
+            if shift {
+                out.push('⇧');
+            }
+        }
+        KeyStyle::Full => {
+            for (flag, name) in [
+                (ctrl, "Ctrl+"),
+                (mods.contains(KeyModifiers::SUPER), "Super+"),
+                (mods.contains(KeyModifiers::ALT), "Alt+"),
+                (shift, "Shift+"),
+            ] {
+                if flag {
+                    out.push_str(name);
+                }
+            }
+        }
+    }
+    out.push_str(&code);
+    out
+}
+
+/// A key sequence as shown on screen; the keys of a sequence are separated by spaces.
+pub fn seq_name(seq: &[KeyEvent], style: KeyStyle) -> String {
+    seq.iter()
+        .map(|k| key_name(k, style))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // --- Action catalog ---
 
 /// One bindable action in one context, with its on-screen texts.
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "used by the problem report and help screen (User Stories 3, 4)"
-)]
 pub struct ActionSpec {
     pub action: Action,
     pub context: KeyContext,
@@ -125,16 +272,6 @@ pub struct ActionSpec {
     pub description: &'static str,
     /// Function-bar order; `None` = not shown in the bar. Lower is shown first.
     pub bar_priority: Option<u8>,
-}
-
-#[allow(
-    dead_code,
-    reason = "used by the problem report and help screen (User Stories 3, 4)"
-)]
-impl ActionSpec {
-    pub fn name(&self) -> String {
-        self.action.to_string()
-    }
 }
 
 const fn spec(
@@ -201,6 +338,7 @@ pub static CATALOG: &[ActionSpec] = {
         spec(C::Normal, A::SyncPanelDir, "Sync", NAV, "Show this directory in the other panel", None),
         spec(C::Normal, A::ToggleMark, "Mark", MARK, "Mark / unmark entry", None),
         spec(C::Normal, A::ToggleMarkAll, "MarkAll", MARK, "Mark / unmark all", None),
+        spec(C::Normal, A::Help, "Help", APP, "Show the keys of this mode", None),
 
         // Git
         spec(C::Git, A::GitStage, "Stage", GIT, "Stage", Some(1)),
@@ -228,6 +366,7 @@ pub static CATALOG: &[ActionSpec] = {
         spec(C::Git, A::GitTabReflog, "Reflog", TABS, "Reflog tab", None),
         spec(C::Git, A::GitTabDiff, "Diff", TABS, "Diff tab", None),
         spec(C::Git, A::GitTabBlame, "Blame", TABS, "Blame tab", None),
+        spec(C::Git, A::Help, "Help", APP, "Show the keys of this mode", None),
 
         // Git commit editor
         spec(C::GitCommit, A::GitCommitSubmit, "Commit", GIT, "Commit with this message", Some(1)),
@@ -239,6 +378,7 @@ pub static CATALOG: &[ActionSpec] = {
         spec(C::GitBranch, A::GitBranchConfirm, "Checkout", GIT, "Check out branch", Some(1)),
         spec(C::GitBranch, A::GitNewBranch, "New", GIT, "New branch", Some(2)),
         spec(C::GitBranch, A::ExitGitMode, "Back", APP, "Close branch list", Some(3)),
+        spec(C::GitBranch, A::Help, "Help", APP, "Show the keys of this mode", None),
 
         // Git tags
         spec(C::GitTag, A::GitTagNavUp, "Up", NAV, "Cursor up", None),
@@ -246,6 +386,7 @@ pub static CATALOG: &[ActionSpec] = {
         spec(C::GitTag, A::GitTagConfirm, "Checkout", GIT, "Check out tagged commit", Some(1)),
         spec(C::GitTag, A::GitTagDelete, "Delete", GIT, "Delete tag", Some(2)),
         spec(C::GitTag, A::ExitGitMode, "Back", APP, "Close tag list", Some(3)),
+        spec(C::GitTag, A::Help, "Help", APP, "Show the keys of this mode", None),
 
         // Global git (repositories)
         spec(C::GlobalGit, A::GlobalGitNavUp, "Up", NAV, "Cursor up", None),
@@ -253,12 +394,14 @@ pub static CATALOG: &[ActionSpec] = {
         spec(C::GlobalGit, A::GlobalGitSelect, "Open", GIT, "Open repository in git mode", Some(1)),
         spec(C::GlobalGit, A::GlobalGitRemove, "Remove", GIT, "Remove from list", Some(2)),
         spec(C::GlobalGit, A::ExitGlobalGitView, "Back", APP, "Back to file panels", Some(3)),
+        spec(C::GlobalGit, A::Help, "Help", APP, "Show the keys of this mode", None),
 
         // Cargo
         spec(C::Cargo, A::CargoNavUp, "Up", NAV, "Cursor up", None),
         spec(C::Cargo, A::CargoNavDown, "Down", NAV, "Cursor down", None),
         spec(C::Cargo, A::CargoRunSelected, "Run", OPS, "Run selected command", Some(1)),
         spec(C::Cargo, A::ExitCargoMode, "Exit", APP, "Back to file panels", Some(2)),
+        spec(C::Cargo, A::Help, "Help", APP, "Show the keys of this mode", None),
 
         // Dialogs
         spec(C::Dialog, A::DialogConfirm, "OK", DLG, "Confirm", Some(1)),
@@ -271,10 +414,18 @@ pub static CATALOG: &[ActionSpec] = {
         spec(C::DialogConfirm, A::DialogCancel, "No", DLG, "No", Some(2)),
         spec(C::QuickCd, A::QuickCdComplete, "Complete", DLG, "Complete selected directory", Some(1)),
         spec(C::QuickCd, A::QuickCdBackspace, "BkSp", DLG, "Delete last character", None),
+
+        // Help screen
+        spec(C::Help, A::HelpClose, "Close", APP, "Close help", Some(1)),
+        spec(C::Help, A::HelpScrollUp, "Up", NAV, "Scroll up", Some(2)),
+        spec(C::Help, A::HelpScrollDown, "Down", NAV, "Scroll down", Some(3)),
+        spec(C::Help, A::HelpPageUp, "PgUp", NAV, "Page up", None),
+        spec(C::Help, A::HelpPageDown, "PgDn", NAV, "Page down", None),
     ]
 };
 
-/// Catalog entries of one context, in catalog order.
+/// Catalog entries of one context, in catalog order. The `Help` action is shown at the end of
+/// the function bar by `func_bar`, so it has no `bar_priority`.
 pub fn catalog_for(context: KeyContext) -> impl Iterator<Item = &'static ActionSpec> {
     CATALOG.iter().filter(move |s| s.context == context)
 }
@@ -292,10 +443,6 @@ fn is_known_action(name: &str) -> bool {
 // --- Problems ---
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "used by the problem report and help screen (User Stories 3, 4)"
-)]
 pub enum ProblemKind {
     UnknownContext,
     UnparseableKey,
@@ -368,7 +515,6 @@ pub struct Binding {
     pub keys: KeySeq,
     pub action: Option<Action>,
     /// The key string as written, for messages.
-    #[allow(dead_code, reason = "used by the problem report (User Story 3)")]
     pub raw: String,
 }
 
@@ -491,16 +637,19 @@ fn is_printable(key: &KeyEvent) -> bool {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
 }
 
-/// Display order for an action's keys: F-keys, then plain keys, Alt, Ctrl, then sequences.
+/// Display order for an action's keys: F-keys, named keys (Esc, arrows, Space), plain characters,
+/// Alt, Ctrl, then sequences.
 fn key_rank(seq: &KeySeq) -> (u8, String) {
     let first = &seq[0];
     let rank = if seq.len() > 1 {
-        4
+        5
     } else if matches!(first.code, KeyCode::F(_)) {
         0
     } else if first.modifiers.contains(KeyModifiers::CONTROL) {
-        3
+        4
     } else if first.modifiers.contains(KeyModifiers::ALT) {
+        3
+    } else if matches!(first.code, KeyCode::Char(c) if c != ' ') {
         2
     } else {
         1
@@ -647,14 +796,27 @@ impl Keymap {
     }
 
     /// Keys bound to `action` in `context`, in display order.
-    #[allow(
-        dead_code,
-        reason = "used by the problem report and help screen (User Stories 3, 4)"
-    )]
     pub fn keys_for(&self, context: KeyContext, action: &Action) -> &[KeySeq] {
         self.keys_for
             .get(&(context, action.to_string()))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// Keys that trigger `action` with this context chain, in display order: the keys of each
+    /// context in turn, skipping keys an earlier context binds to something else.
+    pub fn keys_in_chain(&self, chain: &[KeyContext], action: &Action) -> Vec<KeySeq> {
+        let mut out: Vec<KeySeq> = Vec::new();
+        for (i, context) in chain.iter().enumerate() {
+            for keys in self.keys_for(*context, action) {
+                let shadowed = chain[..i]
+                    .iter()
+                    .any(|c| self.bindings.get(c).is_some_and(|m| m.contains_key(keys)));
+                if !shadowed && !out.contains(keys) {
+                    out.push(keys.clone());
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1231,6 +1393,70 @@ mod tests {
         assert_eq!(
             problems(&crate::config::default_keybindings(), &RawBindings::new()),
             Vec::<String>::new()
+        );
+    }
+
+    // --- Display names (User Story 4) ---
+
+    fn names(raw: &str) -> (String, String) {
+        let s = seq(raw);
+        (
+            seq_name(&s, KeyStyle::Compact),
+            seq_name(&s, KeyStyle::Full),
+        )
+    }
+
+    #[test]
+    fn key_names_compact_and_full() {
+        let cases = [
+            ("<f5>", "F5", "F5"),
+            ("<shift-f6>", "⇧F6", "Shift+F6"),
+            ("<alt-5>", "Alt+5", "Alt+5"),
+            ("<alt-shift-6>", "Alt+⇧6", "Alt+Shift+6"),
+            ("<ctrl-b>", "^B", "Ctrl+B"),
+            ("<ctrl-shift-b>", "^⇧B", "Ctrl+Shift+B"),
+            ("<esc>", "Esc", "Esc"),
+            ("<space>", "Spc", "Space"),
+            ("<tab>", "Tab", "Tab"),
+            ("<backtab>", "⇧Tab", "Shift+Tab"),
+            ("<pageup>", "PgUp", "Page Up"),
+            ("<up>", "↑", "Up"),
+            ("<a>", "a", "a"),
+            ("<A>", "A", "A"),
+            ("<?>", "?", "?"),
+            ("<alt-minus>", "Alt+-", "Alt+-"),
+            ("<ctrl-enter>", "^Enter", "Ctrl+Enter"),
+            ("<ctrl-f><5>", "^F 5", "Ctrl+F 5"),
+            ("<ctrl-f><s><6>", "^F s 6", "Ctrl+F s 6"),
+        ];
+        for (raw, compact, full) in cases {
+            assert_eq!(names(raw), (compact.to_owned(), full.to_owned()), "{raw}");
+        }
+    }
+
+    #[test]
+    fn keys_in_chain_skips_keys_shadowed_by_an_earlier_context() {
+        let defaults = raw(&[
+            (
+                "Dialog",
+                &[
+                    ("<enter>", Some("DialogConfirm")),
+                    ("<y>", Some("DialogConfirm")),
+                ],
+            ),
+            (
+                "DialogConfirm",
+                &[
+                    ("<y>", Some("DialogCancel")),
+                    ("<Y>", Some("DialogConfirm")),
+                ],
+            ),
+        ]);
+        let km = Keymap::build(&defaults, &RawBindings::new());
+        let chain = [KeyContext::DialogConfirm, KeyContext::Dialog];
+        assert_eq!(
+            km.keys_in_chain(&chain, &Action::DialogConfirm),
+            vec![seq("<Y>"), seq("<enter>")]
         );
     }
 }

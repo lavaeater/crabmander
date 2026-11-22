@@ -54,10 +54,14 @@ same lines.
 
 ## 5. Hints match reality (Story 4)
 
-With the config from step 3: the function bar shows `^Y` for Copy in Normal mode and `x` for Stage
-in Git mode; `?` opens help listing every action of the current mode with its keys; `Esc` closes it.
-Typing `?` in the commit editor inserts `?`. Shrink the terminal to 60 columns: entries drop from the
-end, none are cut.
+With the config from step 3: `?` opens help listing every action of the current mode with all its
+keys (`Ctrl+Y` under Copy in Normal mode, `x` under Stage in Git mode); `Esc` closes it. The function
+bar shows up to two keys per action, F-key first, so `^Y` only appears there once `<f5>` and
+`<alt-5>` are removed too. Typing `?` in the commit editor inserts `?`. Shrink the terminal to 60
+columns: entries drop from the end, none are cut, `?Help` stays last.
+
+Checked 2026-11-22 in tmux (no kitty protocol): all of the above as described, plus the help footer
+note about Alt+Shift+digit.
 
 ## 6. Terminal and layout matrix (R5)
 

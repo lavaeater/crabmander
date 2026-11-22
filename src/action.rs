@@ -130,6 +130,8 @@ pub enum Action {
     HelpClose,
     HelpScrollUp,
     HelpScrollDown,
+    HelpPageUp,
+    HelpPageDown,
 
     // Navigation
     NavUp,

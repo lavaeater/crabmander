@@ -20,9 +20,10 @@ use crate::{
         cargo_view::CargoView,
         context_menu::{ContextMenuProvider, MenuCtx, builtin_providers},
         dialog::{self, DialogState, MenuAction, MenuItem},
-        func_bar::{self, FuncBarMode},
+        func_bar,
         git_view::{GitView, GitViewTab},
         global_git_view::GlobalGitView,
+        help,
         panel::{Panel, copy_recursive, delete_recursive, extract_archive_sync, file_name_of},
     },
     config::{Config, get_data_dir},
@@ -64,7 +65,12 @@ pub enum Mode {
     GitTag,
     GlobalGit,
     Cargo,
+    /// The `?` help overlay; `App::help_prior_mode` is the mode underneath.
+    Help,
 }
+
+/// Lines moved by HelpPageUp/HelpPageDown.
+const HELP_PAGE: usize = 10;
 
 pub struct App {
     config: Config,
@@ -108,6 +114,11 @@ pub struct App {
     /// Keys of an unfinished multi-key sequence (e.g. after the Ctrl+F leader), normalized.
     pending_keys: Vec<KeyEvent>,
     pending_since: Option<Instant>,
+    /// Mode to return to when the help overlay closes.
+    help_prior_mode: Mode,
+    help_scroll: usize,
+    /// Whether the terminal reports Alt+Shift+digit (kitty keyboard protocol); set on start.
+    keyboard_enhanced: bool,
     action_tx: mpsc::UnboundedSender<Action>,
     action_rx: mpsc::UnboundedReceiver<Action>,
 }
@@ -173,6 +184,9 @@ impl App {
             should_suspend: false,
             pending_keys: Vec::new(),
             pending_since: None,
+            help_prior_mode: Mode::Normal,
+            help_scroll: 0,
+            keyboard_enhanced: true,
             action_tx,
             action_rx,
         };
@@ -205,6 +219,7 @@ impl App {
             .tick_rate(self.tick_rate)
             .frame_rate(self.frame_rate);
         tui.enter()?;
+        self.keyboard_enhanced = tui.keyboard_enhanced();
 
         self.left.reload();
         self.right.reload();
@@ -762,17 +777,37 @@ impl App {
                     }
                 }
 
-                // The help screen arrives with User Story 4.
-                Action::Help
-                | Action::HelpClose
-                | Action::HelpScrollUp
-                | Action::HelpScrollDown => {}
+                // Help overlay
+                Action::Help => self.open_help(),
+                Action::HelpClose => {
+                    if self.mode == Mode::Help {
+                        self.mode = self.help_prior_mode;
+                    }
+                }
+                Action::HelpScrollUp => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Action::HelpScrollDown => self.scroll_help_down(1),
+                Action::HelpPageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(HELP_PAGE);
+                }
+                Action::HelpPageDown => self.scroll_help_down(HELP_PAGE),
             }
         }
         Ok(())
     }
 
     fn render(&mut self, tui: &mut Tui) -> color_eyre::Result<()> {
+        // With help open, the view underneath is drawn as it was.
+        let help_open = self.mode == Mode::Help;
+        let view_mode = if help_open {
+            self.help_prior_mode
+        } else {
+            self.mode
+        };
+        let view_chain = self.view_chain();
+        let bar_chain = KeyContext::chain(self.mode, self.dialog.as_ref());
+        let keymap = Arc::clone(&self.config.keymap);
+        let help_scroll = self.help_scroll;
+        let keyboard_enhanced = self.keyboard_enhanced;
         let left = &mut self.left;
         let right = &mut self.right;
         let active = self.active;
@@ -781,17 +816,17 @@ impl App {
         let git_view = &mut self.git_view;
         let cargo_view = &self.cargo_view;
         let git_mode = matches!(
-            self.mode,
+            view_mode,
             Mode::Git | Mode::GitCommit | Mode::GitBranch | Mode::GitTag
         );
-        let global_git_mode = self.mode == Mode::GlobalGit;
+        let global_git_mode = view_mode == Mode::GlobalGit;
         let global_git_view = &mut self.global_git_view;
-        let cargo_mode = self.mode == Mode::Cargo;
+        let cargo_mode = view_mode == Mode::Cargo;
         let commit_textarea = &mut self.commit_textarea;
         let branch_list = &self.branch_list;
         let branch_cursor = self.branch_cursor;
-        let show_branches = self.mode == Mode::GitBranch;
-        let show_tags = self.mode == Mode::GitTag;
+        let show_branches = view_mode == Mode::GitBranch;
+        let show_tags = view_mode == Mode::GitTag;
         let tag_list = &self.tag_list;
         let tag_cursor = self.tag_cursor;
         let palette = &self.palette;
@@ -850,22 +885,32 @@ impl App {
                 }
             }
 
-            let fb_mode = if global_git_mode {
-                FuncBarMode::GlobalGit
-            } else if git_mode {
-                FuncBarMode::Git
+            let bar_style = if global_git_mode || git_mode {
+                palette.funcbar_git
             } else if cargo_mode {
-                FuncBarMode::Cargo
+                palette.funcbar_cargo
             } else {
-                FuncBarMode::Normal
+                palette.funcbar_normal
             };
-            func_bar::draw(frame, func_area, fb_mode, palette);
+            func_bar::draw(frame, func_area, &keymap, bar_chain, bar_style);
 
             if let Some(d) = dialog {
                 dialog::draw(frame, d, area, palette);
             }
 
             draw_ops_overlay(frame, area, ops, palette);
+
+            if help_open {
+                help::draw(
+                    frame,
+                    panels_area,
+                    &keymap,
+                    view_chain,
+                    help_scroll,
+                    keyboard_enhanced,
+                    palette,
+                );
+            }
         })?;
         Ok(())
     }
@@ -1163,6 +1208,33 @@ impl App {
         ));
 
         self.open_dialog(DialogState::context_menu("User Commands", items));
+    }
+
+    /// The context chain of the mode underneath the help overlay (or of the current mode).
+    fn view_chain(&self) -> &'static [KeyContext] {
+        let mode = if self.mode == Mode::Help {
+            self.help_prior_mode
+        } else {
+            self.mode
+        };
+        KeyContext::chain(mode, self.dialog.as_ref())
+    }
+
+    /// Opens help for the current mode, unless it is a text field (where `?` is text) or help is
+    /// already open.
+    fn open_help(&mut self) {
+        let chain = KeyContext::chain(self.mode, self.dialog.as_ref());
+        if self.mode == Mode::Help || chain[0].is_text_input() {
+            return;
+        }
+        self.help_prior_mode = self.mode;
+        self.help_scroll = 0;
+        self.mode = Mode::Help;
+    }
+
+    fn scroll_help_down(&mut self, lines: usize) {
+        let rows = help::rows(&self.config.keymap, self.view_chain()).len();
+        self.help_scroll = (self.help_scroll + lines).min(rows.saturating_sub(1));
     }
 
     fn open_dialog(&mut self, state: DialogState) {
