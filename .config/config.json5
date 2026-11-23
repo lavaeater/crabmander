@@ -26,24 +26,138 @@
       // Marking
       "<space>": "ToggleMark",
       "<insert>": "ToggleMark",
+      "<*>": "ToggleMarkAll",
 
-      // Operations — F-keys plus shift-letter fallbacks for terminals/compositors
-      // that intercept function keys (e.g. COSMIC desktop).
-      "<f1>": "QuickCd",
-      "<shift-f1>": "RecentDirs",
-      "<f2>": "ContextMenu",      "<shift-x>": "ContextMenu",
-      "<shift-f2>": "UserCommands",
-      "<f3>": "View",             "<shift-e>": "View",
-      "<f4>": "CalcSizes",        "<shift-z>": "CalcSizes",
-      "<f5>": "Copy",             "<shift-y>": "Copy",
-      "<f6>": "Move",             "<shift-r>": "Move",
-      "<shift-f6>": "Rename",
-      "<f7>": "Mkdir",            "<shift-k>": "Mkdir",
-      "<f8>": "Delete",           "<shift-d>": "Delete",
-      "<f9>": "CycleSortMode",    "<shift-s>": "CycleSortMode",
-      "<shift-f9>": "InvertSort",
-      "<f11>": "SelectTheme",     "<shift-t>": "SelectTheme",
-      "<f12>": "GlobalGitView",   "<shift-g>": "GlobalGitView",
+      // Operations. Every F-key has two fallbacks for terminals and desktops that
+      // swallow F-keys: Alt + the same digit (F10 = Alt+0, F11 = Alt+Minus, F12 = Alt+=;
+      // Shift+Fn = Alt+Shift+digit), and the Ctrl+F leader followed by the digit
+      // (Ctrl+F s digit for Shift+Fn), which works in every terminal and layout.
+      "<f1>": "QuickCd",            "<alt-1>": "QuickCd",            "<ctrl-f><1>": "QuickCd",
+      "<shift-f1>": "RecentDirs",   "<alt-shift-1>": "RecentDirs",   "<ctrl-f><s><1>": "RecentDirs",
+      "<f2>": "ContextMenu",        "<alt-2>": "ContextMenu",        "<ctrl-f><2>": "ContextMenu",
+      "<shift-f2>": "UserCommands", "<alt-shift-2>": "UserCommands", "<ctrl-f><s><2>": "UserCommands",
+      "<f3>": "View",               "<alt-3>": "View",               "<ctrl-f><3>": "View",
+      "<f4>": "CalcSizes",          "<alt-4>": "CalcSizes",          "<ctrl-f><4>": "CalcSizes",
+      "<f5>": "Copy",               "<alt-5>": "Copy",               "<ctrl-f><5>": "Copy",
+      "<f6>": "Move",               "<alt-6>": "Move",               "<ctrl-f><6>": "Move",
+      "<shift-f6>": "Rename",       "<alt-shift-6>": "Rename",       "<ctrl-f><s><6>": "Rename",
+      "<f7>": "Mkdir",              "<alt-7>": "Mkdir",              "<ctrl-f><7>": "Mkdir",
+      "<f8>": "Delete",             "<alt-8>": "Delete",             "<ctrl-f><8>": "Delete",
+      "<f9>": "CycleSortMode",      "<alt-9>": "CycleSortMode",      "<ctrl-f><9>": "CycleSortMode",
+      "<shift-f9>": "InvertSort",   "<alt-shift-9>": "InvertSort",   "<ctrl-f><s><9>": "InvertSort",
+      "<f10>": "Quit",              "<alt-0>": "Quit",               "<ctrl-f><0>": "Quit",
+      "<f11>": "SelectTheme",       "<alt-minus>": "SelectTheme",    "<ctrl-f><minus>": "SelectTheme",
+      "<f12>": "GlobalGitView",     "<alt-equals>": "GlobalGitView", "<ctrl-f><equals>": "GlobalGitView",
+
+      // Modes
+      "<ctrl-g>": "EnterGitMode",
+      "<ctrl-b>": "EnterCargoMode",
+      "<?>": "Help",
+    },
+
+    // F1–F7 have the same Alt+digit and Ctrl+F digit fallbacks as in Normal.
+    "Git": {
+      "<esc>": "ExitGitMode",        "<q>": "ExitGitMode",
+      "<up>": "GitNavUp",            "<k>": "GitNavUp",
+      "<down>": "GitNavDown",        "<j>": "GitNavDown",
+      "<pageup>": "GitPageUp",
+      "<pagedown>": "GitPageDown",
+      "<tab>": "GitSwitchPane",
+      "<space>": "GitToggleMark",    "<insert>": "GitToggleMark",
+      "<f1>": "GitStage",            "<a>": "GitStage",  "<alt-1>": "GitStage",  "<ctrl-f><1>": "GitStage",
+      "<f2>": "GitUnstage",          "<u>": "GitUnstage",  "<alt-2>": "GitUnstage",  "<ctrl-f><2>": "GitUnstage",
+      "<f3>": "GitCommit",           "<c>": "GitCommit",  "<alt-3>": "GitCommit",  "<ctrl-f><3>": "GitCommit",
+      "<f4>": "GitPush",             "<p>": "GitPush",  "<alt-4>": "GitPush",  "<ctrl-f><4>": "GitPush",
+      "<f5>": "GitPull",             "<P>": "GitPull",  "<alt-5>": "GitPull",  "<ctrl-f><5>": "GitPull",
+      "<f6>": "GitListBranches",     "<b>": "GitListBranches",  "<alt-6>": "GitListBranches",  "<ctrl-f><6>": "GitListBranches",
+      "<f7>": "GitAddAllAndCommit",  "<A>": "GitAddAllAndCommit",  "<alt-7>": "GitAddAllAndCommit",  "<ctrl-f><7>": "GitAddAllAndCommit",
+      "<n>": "GitNewBranch",
+      "<r>": "GitReload",
+      "<t>": "GitCreateTag",
+      "<T>": "GitListTags",
+      "<S>": "GitSuperCommit",
+      // Tabs
+      "<s>": "GitTabStatus",
+      "<l>": "GitTabLog",
+      "<g>": "GitTabGraph",
+      "<R>": "GitTabReflog",
+      "<d>": "GitTabDiff",
+      "<B>": "GitTabBlame",
+      "<?>": "Help",
+    },
+
+    // Commit message editor: every other key is text.
+    "GitCommit": {
+      "<esc>": "GitCommitCancel",
+      "<ctrl-enter>": "GitCommitSubmit",
+      "<alt-enter>": "GitCommitSubmit",
+    },
+
+    "GitBranch": {
+      "<esc>": "ExitGitMode",
+      "<up>": "GitBranchNavUp",      "<k>": "GitBranchNavUp",
+      "<down>": "GitBranchNavDown",  "<j>": "GitBranchNavDown",
+      "<enter>": "GitBranchConfirm",
+      "<n>": "GitNewBranch",
+      "<?>": "Help",
+    },
+
+    "GitTag": {
+      "<esc>": "ExitGitMode",        "<q>": "ExitGitMode",
+      "<up>": "GitTagNavUp",         "<k>": "GitTagNavUp",
+      "<down>": "GitTagNavDown",     "<j>": "GitTagNavDown",
+      "<enter>": "GitTagConfirm",
+      "<d>": "GitTagDelete",
+      "<?>": "Help",
+    },
+
+    // Git repositories list (F12)
+    "GlobalGit": {
+      "<esc>": "ExitGlobalGitView",  "<q>": "ExitGlobalGitView",
+      "<up>": "GlobalGitNavUp",      "<k>": "GlobalGitNavUp",
+      "<down>": "GlobalGitNavDown",  "<j>": "GlobalGitNavDown",
+      "<enter>": "GlobalGitSelect",
+      "<d>": "GlobalGitRemove",      "<delete>": "GlobalGitRemove",
+      "<?>": "Help",
+    },
+
+    "Cargo": {
+      "<esc>": "ExitCargoMode",      "<q>": "ExitCargoMode",
+      "<up>": "CargoNavUp",          "<k>": "CargoNavUp",
+      "<down>": "CargoNavDown",      "<j>": "CargoNavDown",
+      "<enter>": "CargoRunSelected",
+      "<?>": "Help",
+    },
+
+    // All dialogs. Typed characters go to the dialog's text field.
+    "Dialog": {
+      "<enter>": "DialogConfirm",
+      "<esc>": "DialogCancel",
+      "<up>": "DialogNavUp",
+      "<down>": "DialogNavDown",
+      "<delete>": "DialogDeleteSelected",
+      "<backspace>": "DialogInputBackspace",
+    },
+
+    // Yes/no confirmations; falls back to "Dialog".
+    "DialogConfirm": {
+      "<y>": "DialogConfirm",        "<Y>": "DialogConfirm",
+      "<n>": "DialogCancel",         "<N>": "DialogCancel",
+    },
+
+    // Quick CD (F1); falls back to "Dialog".
+    "QuickCd": {
+      "<tab>": "QuickCdComplete",
+      "<backspace>": "QuickCdBackspace",
+    },
+
+    // The `?` help overlay.
+    "Help": {
+      "<esc>": "HelpClose",          "<?>": "HelpClose",            "<q>": "HelpClose",
+      "<up>": "HelpScrollUp",        "<k>": "HelpScrollUp",
+      "<down>": "HelpScrollDown",    "<j>": "HelpScrollDown",
+      "<pageup>": "HelpPageUp",
+      "<pagedown>": "HelpPageDown",
     },
   }
 }

@@ -127,6 +127,11 @@ pub enum Action {
     ClearScreen,
     Error(String),
     Help,
+    HelpClose,
+    HelpScrollUp,
+    HelpScrollDown,
+    HelpPageUp,
+    HelpPageDown,
 
     // Navigation
     NavUp,
@@ -309,6 +314,8 @@ pub enum Action {
     GitPush,
     GitPull,
     GitReload,
+    GitPageUp,
+    GitPageDown,
     GitAddAllAndCommit,
     GitAddAllDone,
     GitListBranches,

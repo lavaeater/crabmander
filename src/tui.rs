@@ -10,9 +10,8 @@ use crossterm::{
     cursor,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind,
-        KeyboardEnhancementFlags, MouseEvent, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        Event as CrosstermEvent, EventStream, KeyEvent, KeyEventKind, KeyboardEnhancementFlags,
+        MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -25,7 +24,7 @@ use tokio::{
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::error;
+use tracing::{debug, error, trace};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
@@ -123,20 +122,23 @@ impl Tui {
             .expect("failed to send init event");
         loop {
             let event = tokio::select! {
-                _ = cancellation_token.cancelled() => {
+                () = cancellation_token.cancelled() => {
                     break;
                 }
                 _ = tick_interval.tick() => Event::Tick,
                 _ = render_interval.tick() => Event::Render,
                 crossterm_event = event_stream.next().fuse() => match crossterm_event {
-                    Some(Ok(event)) => match event {
+                    Some(Ok(event)) => {
+                        Self::trace_key(&event);
+                        match event {
                         CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => Event::Key(key),
                         CrosstermEvent::Mouse(mouse) => Event::Mouse(mouse),
                         CrosstermEvent::Resize(x, y) => Event::Resize(x, y),
                         CrosstermEvent::FocusLost => Event::FocusLost,
                         CrosstermEvent::FocusGained => Event::FocusGained,
                         CrosstermEvent::Paste(s) => Event::Paste(s),
-                        _ => continue, // ignore other events
+                        CrosstermEvent::Key(_) => continue, // ignore non-press key events
+                        }
                     }
                     Some(Err(_)) => Event::Error,
                     None => break, // the event stream has stopped and will not produce any more events
@@ -150,7 +152,7 @@ impl Tui {
         cancellation_token.cancel();
     }
 
-    pub fn stop(&self) -> color_eyre::Result<()> {
+    pub fn stop(&self) {
         self.cancel();
         let mut counter = 0;
         while !self.task.is_finished() {
@@ -164,7 +166,20 @@ impl Tui {
                 break;
             }
         }
-        Ok(())
+    }
+
+    /// Logs every raw key event, for checking what a terminal and keyboard layout actually send
+    /// (run with `RUST_LOG=crabmander=trace`).
+    fn trace_key(event: &CrosstermEvent) {
+        if let CrosstermEvent::Key(key) = event {
+            trace!(
+                code = ?key.code,
+                modifiers = ?key.modifiers,
+                kind = ?key.kind,
+                state = ?key.state,
+                "raw key event"
+            );
+        }
     }
 
     pub fn enter(&mut self) -> color_eyre::Result<()> {
@@ -182,18 +197,20 @@ impl Tui {
         if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
             let _ = crossterm::execute!(
                 stdout(),
-                PushKeyboardEnhancementFlags(
-                    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-                )
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,)
             );
             self.keyboard_enhanced = true;
         }
+        debug!(
+            enhanced = self.keyboard_enhanced,
+            "kitty keyboard protocol (disambiguate escape codes)"
+        );
         self.start();
         Ok(())
     }
 
     pub fn exit(&mut self) -> color_eyre::Result<()> {
-        self.stop()?;
+        self.stop();
         if crossterm::terminal::is_raw_mode_enabled()? {
             self.flush()?;
             if self.keyboard_enhanced {
@@ -210,6 +227,11 @@ impl Tui {
             crossterm::terminal::disable_raw_mode()?;
         }
         Ok(())
+    }
+
+    /// Whether the kitty keyboard protocol is active, so Alt+Shift+digit is reported as such.
+    pub const fn keyboard_enhanced(&self) -> bool {
+        self.keyboard_enhanced
     }
 
     pub fn cancel(&self) {

@@ -1,5 +1,13 @@
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{prelude::*, widgets::Clear};
+use ratatui::{
+    prelude::*,
+    widgets::{Clear, Paragraph},
+};
 use ratatui_textarea::TextArea;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -7,25 +15,44 @@ use tracing::{debug, info};
 
 use crate::{
     action::{Action, BranchInfo, Side, TagInfo},
+    bookmarks,
     components::{
         cargo_view::CargoView,
-        context_menu::{builtin_providers, ContextMenuProvider, MenuCtx},
+        context_menu::{ContextMenuProvider, MenuCtx, builtin_providers},
         dialog::{self, DialogState, MenuAction, MenuItem},
-        func_bar::{self, FuncBarMode},
+        func_bar,
         git_view::{GitView, GitViewTab},
         global_git_view::GlobalGitView,
+        help,
         panel::{Panel, copy_recursive, delete_recursive, extract_archive_sync, file_name_of},
     },
     config::{Config, get_data_dir},
+    git_repos,
+    keymap::{self, KeyContext, Lookup},
+    last_paths,
     ops::{DeferredOp, OpCtx},
     palette::Palette,
-    bookmarks,
-    git_repos,
-    last_paths,
     recent_dirs,
-    user_commands,
     tui::{Event, Tui},
+    user_commands,
 };
+
+/// How long to wait for the next key of a multi-key sequence.
+const KEY_SEQUENCE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// A character key without Ctrl/Alt: text in text-input contexts.
+fn is_printable(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(_))
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// While the panel filter has text, typed characters extend it even if they are bound (so `j`,
+/// `q` or `?` can be part of a file name). Ctrl/Alt keys still run their bindings.
+fn filter_claims(filter_active: bool, key: &KeyEvent) -> bool {
+    filter_active && is_printable(key)
+}
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Mode {
@@ -38,7 +65,12 @@ pub enum Mode {
     GitTag,
     GlobalGit,
     Cargo,
+    /// The `?` help overlay; `App::help_prior_mode` is the mode underneath.
+    Help,
 }
+
+/// Lines moved by HelpPageUp/HelpPageDown.
+const HELP_PAGE: usize = 10;
 
 pub struct App {
     config: Config,
@@ -56,7 +88,7 @@ pub struct App {
     /// Invalidated on any mutating file operation.
     dir_size_cache: std::collections::HashMap<std::path::PathBuf, u64>,
     /// Command to run after suspending the TUI (set by Execute action).
-    /// Tuple: (cmd, args, sides_to_reload_after).
+    /// Tuple: (cmd, args, `sides_to_reload_after`).
     pending_command: Option<(String, Vec<String>, Vec<Side>)>,
     git_view: Option<GitView>,
     cargo_view: Option<CargoView>,
@@ -79,7 +111,14 @@ pub struct App {
     next_op_id: u64,
     should_quit: bool,
     should_suspend: bool,
-    last_tick_key_events: Vec<KeyEvent>,
+    /// Keys of an unfinished multi-key sequence (e.g. after the Ctrl+F leader), normalized.
+    pending_keys: Vec<KeyEvent>,
+    pending_since: Option<Instant>,
+    /// Mode to return to when the help overlay closes.
+    help_prior_mode: Mode,
+    help_scroll: usize,
+    /// Whether the terminal reports Alt+Shift+digit (kitty keyboard protocol); set on start.
+    keyboard_enhanced: bool,
     action_tx: mpsc::UnboundedSender<Action>,
     action_rx: mpsc::UnboundedReceiver<Action>,
 }
@@ -89,7 +128,10 @@ impl App {
         let (action_tx, action_rx) = mpsc::unbounded_channel();
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
         let saved = last_paths::load(&get_data_dir());
-        let left_path = saved.left.filter(|p| p.is_dir()).unwrap_or_else(|| cwd.clone());
+        let left_path = saved
+            .left
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| cwd.clone());
         let right_path = saved.right.filter(|p| p.is_dir()).unwrap_or(cwd);
 
         let mut left = Panel::new(Side::Left, left_path, action_tx.clone());
@@ -97,14 +139,16 @@ impl App {
         left.is_active = true;
 
         let config = Config::new()?;
-        let opaline_theme = opaline::builtins::load_by_name(&config.theme)
-            .unwrap_or_else(|| {
-                tracing::warn!("unknown theme {:?}, falling back to catppuccin-mocha", config.theme);
-                opaline::builtins::load_by_name("catppuccin-mocha").expect("builtin must exist")
-            });
+        let opaline_theme = opaline::builtins::load_by_name(&config.theme).unwrap_or_else(|| {
+            tracing::warn!(
+                "unknown theme {:?}, falling back to catppuccin-mocha",
+                config.theme
+            );
+            opaline::builtins::load_by_name("catppuccin-mocha").expect("builtin must exist")
+        });
         let palette = Palette::from(&opaline_theme);
 
-        Ok(Self {
+        let mut app = Self {
             config,
             palette,
             tick_rate,
@@ -138,10 +182,36 @@ impl App {
             next_op_id: 0,
             should_quit: false,
             should_suspend: false,
-            last_tick_key_events: Vec::new(),
+            pending_keys: Vec::new(),
+            pending_since: None,
+            help_prior_mode: Mode::Normal,
+            help_scroll: 0,
+            keyboard_enhanced: true,
             action_tx,
             action_rx,
-        })
+        };
+        app.report_keybinding_problems();
+        Ok(app)
+    }
+
+    /// Logs keybinding problems and lists them in a dialog before anything else is shown
+    /// (contracts/ui-hints.md "Startup problem report").
+    fn report_keybinding_problems(&mut self) {
+        let lines: Vec<String> = self
+            .config
+            .keymap
+            .problems
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        for line in &lines {
+            tracing::warn!("keybinding problem: {line}");
+        }
+        let title = format!("Keybinding problems ({})", lines.len());
+        self.open_dialog(DialogState::error_list(title, lines));
     }
 
     pub async fn run(&mut self) -> color_eyre::Result<()> {
@@ -149,6 +219,7 @@ impl App {
             .tick_rate(self.tick_rate)
             .frame_rate(self.frame_rate);
         tui.enter()?;
+        self.keyboard_enhanced = tui.keyboard_enhanced();
 
         self.left.reload();
         self.right.reload();
@@ -164,8 +235,8 @@ impl App {
                 println!("\nRunning: {} {}\n", cmd, args.join(" "));
                 std::process::Command::new(&cmd).args(&args).status().ok();
                 println!("\nPress Enter to continue...");
-                let mut _s = String::new();
-                std::io::stdin().read_line(&mut _s).ok();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok();
                 tui.enter()?;
                 action_tx.send(Action::ClearScreen)?;
                 for side in reload {
@@ -179,7 +250,7 @@ impl App {
                 action_tx.send(Action::ClearScreen)?;
                 tui.enter()?;
             } else if self.should_quit {
-                tui.stop()?;
+                tui.stop();
                 break;
             }
         }
@@ -203,215 +274,90 @@ impl App {
         Ok(())
     }
 
-    fn handle_key_event(&mut self, key: KeyEvent) -> color_eyre::Result<()> {
+    fn handle_key_event(&mut self, raw_key: KeyEvent) -> color_eyre::Result<()> {
         let tx = self.action_tx.clone();
+        let key = keymap::normalize(raw_key);
 
-        if self.mode == Mode::Dialog {
-            let is_qcd = self
-                .dialog
-                .as_ref()
-                .map(|d| d.is_quick_cd())
-                .unwrap_or(false);
-            let is_confirm = matches!(&self.dialog, Some(DialogState::Confirm { .. }));
-
-            match key.code {
-                KeyCode::Enter => tx.send(Action::DialogConfirm)?,
-                KeyCode::Esc => tx.send(Action::DialogCancel)?,
-                KeyCode::Up => tx.send(Action::DialogNavUp)?,
-                KeyCode::Down => tx.send(Action::DialogNavDown)?,
-                KeyCode::Delete if !is_qcd => tx.send(Action::DialogDeleteSelected)?,
-
-                // QuickCd-specific
-                KeyCode::Tab if is_qcd => tx.send(Action::QuickCdComplete)?,
-                KeyCode::Backspace if is_qcd => tx.send(Action::QuickCdBackspace)?,
-                KeyCode::Char(c)
-                    if is_qcd
-                        && !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    tx.send(Action::QuickCdChar(c))?;
-                }
-
-                // Confirm-dialog y/n shortcuts
-                KeyCode::Char('y' | 'Y') if is_confirm => {
-                    tx.send(Action::DialogConfirm)?;
-                }
-                KeyCode::Char('n' | 'N') if is_confirm => {
-                    tx.send(Action::DialogCancel)?;
-                }
-
-                // Input dialogs
-                KeyCode::Backspace => tx.send(Action::DialogInputBackspace)?,
-                KeyCode::Char(c)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    tx.send(Action::DialogInputChar(c))?;
-                }
-                _ => {}
-            }
+        // Ctrl+C always quits, whatever the config says (FR-010).
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            self.pending_keys.clear();
+            tx.send(Action::Quit)?;
             return Ok(());
         }
 
-        if self.mode == Mode::GitCommit {
-            match key.code {
-                KeyCode::Esc => tx.send(Action::GitCommitCancel)?,
-                KeyCode::Enter
-                    if key.modifiers.contains(KeyModifiers::CONTROL)
-                        || key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    tx.send(Action::GitCommitSubmit)?;
-                }
-                _ => {
-                    if let Some(ta) = &mut self.commit_textarea {
-                        ta.input(key);
+        let chain = KeyContext::chain(self.mode, self.dialog.as_ref());
+
+        if self.pending_keys.is_empty() {
+            // In text-input contexts, typed characters are text even if bound (FR-013).
+            if chain[0].is_text_input() && is_printable(&key) {
+                return self.key_fallthrough(chain, raw_key);
+            }
+            // While a filter is active, typed characters and Backspace edit the filter rather
+            // than triggering whatever the config binds them to (e.g. `j`, NavParent).
+            let filter_active = !self.active_panel().filter.is_empty();
+            if self.mode == Mode::Normal && filter_active {
+                match raw_key.code {
+                    KeyCode::Char(c) if filter_claims(filter_active, &key) => {
+                        tx.send(Action::FilterChar(c))?;
+                        return Ok(());
                     }
+                    KeyCode::Backspace => {
+                        tx.send(Action::FilterBackspace)?;
+                        return Ok(());
+                    }
+                    _ => {}
                 }
             }
-            return Ok(());
         }
 
-        if self.mode == Mode::GitBranch {
-            match key.code {
-                KeyCode::Esc => tx.send(Action::ExitGitMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitBranchNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitBranchNavDown)?,
-                KeyCode::Enter => tx.send(Action::GitBranchConfirm)?,
-                KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::GitTag {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitTagNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitTagNavDown)?,
-                KeyCode::Enter => tx.send(Action::GitTagConfirm)?,
-                KeyCode::Char('d') => tx.send(Action::GitTagDelete)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::Git {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGitMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GitNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GitNavDown)?,
-                KeyCode::Tab => tx.send(Action::GitSwitchPane)?,
-                KeyCode::Char(' ') | KeyCode::Insert => tx.send(Action::GitToggleMark)?,
-                KeyCode::F(1) | KeyCode::Char('a') => tx.send(Action::GitStage)?,
-                KeyCode::F(2) | KeyCode::Char('u') => tx.send(Action::GitUnstage)?,
-                KeyCode::F(3) | KeyCode::Char('c') => tx.send(Action::GitCommit)?,
-                KeyCode::F(4) | KeyCode::Char('p') => tx.send(Action::GitPush)?,
-                KeyCode::F(5) | KeyCode::Char('P') => tx.send(Action::GitPull)?,
-                KeyCode::F(6) | KeyCode::Char('b') => tx.send(Action::GitListBranches)?,
-                KeyCode::F(7) | KeyCode::Char('A') => tx.send(Action::GitAddAllAndCommit)?,
-                KeyCode::Char('n') => tx.send(Action::GitNewBranch)?,
-                KeyCode::Char('r') => tx.send(Action::GitReload)?,
-                KeyCode::Char('t') => tx.send(Action::GitCreateTag)?,
-                KeyCode::Char('T') => tx.send(Action::GitListTags)?,
-                KeyCode::Char('S') => tx.send(Action::GitSuperCommit)?,
-                // Tab switching
-                KeyCode::Char('s') => tx.send(Action::GitTabStatus)?,
-                KeyCode::Char('l') => tx.send(Action::GitTabLog)?,
-                KeyCode::Char('g') => tx.send(Action::GitTabGraph)?,
-                KeyCode::Char('R') => tx.send(Action::GitTabReflog)?,
-                KeyCode::Char('d') => tx.send(Action::GitTabDiff)?,
-                KeyCode::Char('B') => tx.send(Action::GitTabBlame)?,
-                KeyCode::PageUp => {
-                    if let Some(gv) = &mut self.git_view { gv.tab_page_up(10); }
-                }
-                KeyCode::PageDown => {
-                    if let Some(gv) = &mut self.git_view { gv.tab_page_down(10); }
-                }
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::GlobalGit {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitGlobalGitView)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::GlobalGitNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::GlobalGitNavDown)?,
-                KeyCode::Enter => tx.send(Action::GlobalGitSelect)?,
-                KeyCode::Char('d') | KeyCode::Delete => tx.send(Action::GlobalGitRemove)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        if self.mode == Mode::Cargo {
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => tx.send(Action::ExitCargoMode)?,
-                KeyCode::Up | KeyCode::Char('k') => tx.send(Action::CargoNavUp)?,
-                KeyCode::Down | KeyCode::Char('j') => tx.send(Action::CargoNavDown)?,
-                KeyCode::Enter => tx.send(Action::CargoRunSelected)?,
-                _ => {}
-            }
-            return Ok(());
-        }
-
-        // Ctrl+B enters cargo mode when the active panel is inside a Rust project.
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('b') {
-            if self.active_panel().cargo_root.is_some() {
-                tx.send(Action::EnterCargoMode)?;
-            }
-            return Ok(());
-        }
-
-        // Ctrl+G enters git mode and bookmarks the repo.
-        if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('g') {
-            if self.active_panel().git_branch.is_some() {
-                tx.send(Action::EnterGitMode)?;
-            }
-            return Ok(());
-        }
-
-        // While a filter is active, Backspace edits the filter rather than
-        // triggering whatever action a config binds it to (e.g. NavParent).
-        if key.code == KeyCode::Backspace && !self.active_panel().filter.is_empty() {
-            self.last_tick_key_events.clear();
-            tx.send(Action::FilterBackspace)?;
-            return Ok(());
-        }
-
-        // Normal mode: keybinding lookup first.
-        let Some(keymap) = self.config.keybindings.0.get(&self.mode) else {
-            return Ok(());
-        };
-        match keymap.get(&vec![key]) {
-            Some(action) => {
+        self.pending_keys.push(key);
+        let keymap = Arc::clone(&self.config.keymap);
+        match keymap.resolve(chain, &self.pending_keys) {
+            Lookup::Action(action) => {
                 info!("Got action: {action:?}");
-                self.last_tick_key_events.clear();
-                tx.send(action.clone())?;
+                self.pending_keys.clear();
+                tx.send(action)?;
             }
-            _ => {
-                self.last_tick_key_events.push(key);
-                if let Some(action) = keymap.get(&self.last_tick_key_events) {
-                    info!("Got action: {action:?}");
-                    self.last_tick_key_events.clear();
-                    tx.send(action.clone())?;
-                } else if self.last_tick_key_events.len() == 1 {
-                    // Unbound single key → filter input or Esc to clear filter.
-                    match key.code {
-                        KeyCode::Char(c)
-                            if !key
-                                .modifiers
-                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                        {
-                            tx.send(Action::FilterChar(c))?;
-                        }
-                        KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
-                        KeyCode::Esc => tx.send(Action::FilterClear)?,
-                        _ => {}
-                    }
-                }
+            Lookup::Prefix => self.pending_since = Some(Instant::now()),
+            Lookup::None if self.pending_keys.len() > 1 => {
+                // An unfinished sequence followed by a key that doesn't continue it: drop the
+                // sequence and treat the key on its own.
+                self.pending_keys.clear();
+                return self.handle_key_event(raw_key);
+            }
+            Lookup::None => {
+                self.pending_keys.clear();
+                return self.key_fallthrough(chain, raw_key);
+            }
+        }
+        Ok(())
+    }
+
+    /// Handles a key that no binding claimed: text input, the Normal-mode filter, or nothing.
+    fn key_fallthrough(&mut self, chain: &[KeyContext], key: KeyEvent) -> color_eyre::Result<()> {
+        let tx = self.action_tx.clone();
+        let printable = match key.code {
+            KeyCode::Char(c) if is_printable(&key) => Some(c),
+            _ => None,
+        };
+        if chain.contains(&KeyContext::GitCommit) {
+            if let Some(ta) = &mut self.commit_textarea {
+                ta.input(key);
+            }
+        } else if chain.contains(&KeyContext::QuickCd) {
+            if let Some(c) = printable {
+                tx.send(Action::QuickCdChar(c))?;
+            }
+        } else if chain.contains(&KeyContext::Dialog) {
+            if let Some(c) = printable {
+                tx.send(Action::DialogInputChar(c))?;
+            }
+        } else if chain.contains(&KeyContext::Normal) {
+            match key.code {
+                KeyCode::Char(c) if printable.is_some() => tx.send(Action::FilterChar(c))?,
+                KeyCode::Backspace => tx.send(Action::FilterBackspace)?,
+                KeyCode::Esc => tx.send(Action::FilterClear)?,
+                _ => {}
             }
         }
         Ok(())
@@ -424,14 +370,17 @@ impl App {
             }
             match action {
                 Action::Tick => {
-                    self.last_tick_key_events.drain(..);
+                    // Give up on an unfinished key sequence after a while.
+                    if self
+                        .pending_since
+                        .is_some_and(|t| t.elapsed() > KEY_SEQUENCE_TIMEOUT)
+                    {
+                        self.pending_keys.clear();
+                        self.pending_since = None;
+                    }
                 }
                 Action::Quit => {
-                    last_paths::save(
-                        &get_data_dir(),
-                        &self.left.path,
-                        &self.right.path,
-                    );
+                    last_paths::save(&get_data_dir(), &self.left.path, &self.right.path);
                     self.should_quit = true;
                 }
                 Action::Suspend => self.should_suspend = true,
@@ -455,11 +404,11 @@ impl App {
                 Action::NavUp => self.active_panel_mut().nav_up(),
                 Action::NavDown => self.active_panel_mut().nav_down(),
                 Action::NavPageUp => {
-                    let h = self.panel_page_height(tui);
+                    let h = Self::panel_page_height(tui);
                     self.active_panel_mut().nav_page_up(h);
                 }
                 Action::NavPageDown => {
-                    let h = self.panel_page_height(tui);
+                    let h = Self::panel_page_height(tui);
                     self.active_panel_mut().nav_page_down(h);
                 }
                 Action::NavTop => self.active_panel_mut().nav_top(),
@@ -487,7 +436,7 @@ impl App {
                     if let Some(DialogState::QuickCd { input, .. }) = &mut self.dialog {
                         if input.is_empty() && c == '~' {
                             let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-                            *input = format!("{}/", home);
+                            *input = format!("{home}/");
                         } else {
                             input.push(c);
                         }
@@ -563,7 +512,8 @@ impl App {
                     branch,
                     is_dirty,
                 } => {
-                    self.get_panel_mut(side).on_git_info_loaded(&path, branch, is_dirty);
+                    self.get_panel_mut(side)
+                        .on_git_info_loaded(&path, branch, is_dirty);
                 }
 
                 // Execute ops (from ExecuteCopy/Move/Delete/Mkdir actions — legacy path)
@@ -623,10 +573,14 @@ impl App {
                 Action::EnterCargoMode => self.enter_cargo_mode(),
                 Action::ExitCargoMode => self.exit_cargo_mode(),
                 Action::CargoNavUp => {
-                    if let Some(cv) = &mut self.cargo_view { cv.nav_up(); }
+                    if let Some(cv) = &mut self.cargo_view {
+                        cv.nav_up();
+                    }
                 }
                 Action::CargoNavDown => {
-                    if let Some(cv) = &mut self.cargo_view { cv.nav_down(); }
+                    if let Some(cv) = &mut self.cargo_view {
+                        cv.nav_down();
+                    }
                 }
                 Action::CargoRunSelected => self.do_cargo_run_selected(),
 
@@ -634,16 +588,24 @@ impl App {
                 Action::EnterGitMode => self.enter_git_mode(),
                 Action::ExitGitMode => self.exit_git_mode(),
                 Action::GitNavUp => {
-                    if let Some(gv) = &mut self.git_view { gv.tab_nav_up(); }
+                    if let Some(gv) = &mut self.git_view {
+                        gv.tab_nav_up();
+                    }
                 }
                 Action::GitNavDown => {
-                    if let Some(gv) = &mut self.git_view { gv.tab_nav_down(); }
+                    if let Some(gv) = &mut self.git_view {
+                        gv.tab_nav_down();
+                    }
                 }
                 Action::GitSwitchPane => {
-                    if let Some(gv) = &mut self.git_view { gv.switch_pane(); }
+                    if let Some(gv) = &mut self.git_view {
+                        gv.switch_pane();
+                    }
                 }
                 Action::GitToggleMark => {
-                    if let Some(gv) = &mut self.git_view { gv.toggle_mark(); }
+                    if let Some(gv) = &mut self.git_view {
+                        gv.toggle_mark();
+                    }
                 }
                 Action::GitSuperCommit => self.do_git_super_commit(),
                 Action::GitAddAllAndCommit => self.do_git_add_all_and_commit(),
@@ -698,7 +660,12 @@ impl App {
                 Action::GitTagDelete => self.do_git_delete_tag(),
                 Action::GitPushFollowTags => self.do_git_push_inner(true),
 
-                Action::Progress { id, label, done, total } => {
+                Action::Progress {
+                    id,
+                    label,
+                    done,
+                    total,
+                } => {
                     if let Some(op) = self.ops.iter_mut().find(|o| o.0 == id) {
                         op.2 = done;
                         op.3 = total;
@@ -710,12 +677,27 @@ impl App {
                     self.ops.retain(|o| o.0 != id);
                 }
 
+                Action::GitPageUp => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.tab_page_up(10);
+                    }
+                }
+                Action::GitPageDown => {
+                    if let Some(gv) = &mut self.git_view {
+                        gv.tab_page_down(10);
+                    }
+                }
                 Action::GitReload | Action::GitOpCompleted => {
                     if let Some(gv) = &self.git_view {
                         GitView::load_status(gv.git_root.clone(), self.action_tx.clone());
                     }
                 }
-                Action::GitStatusLoaded { git_root: _, branch, entries, submodules } => {
+                Action::GitStatusLoaded {
+                    git_root: _,
+                    branch,
+                    entries,
+                    submodules,
+                } => {
                     if let Some(gv) = &mut self.git_view {
                         gv.on_status_loaded(branch, entries, submodules);
                     }
@@ -725,14 +707,22 @@ impl App {
                 Action::GlobalGitView => self.enter_global_git_mode(),
                 Action::ExitGlobalGitView => self.exit_global_git_mode(),
                 Action::GlobalGitNavUp => {
-                    if let Some(ggv) = &mut self.global_git_view { ggv.nav_up(); }
+                    if let Some(ggv) = &mut self.global_git_view {
+                        ggv.nav_up();
+                    }
                 }
                 Action::GlobalGitNavDown => {
-                    if let Some(ggv) = &mut self.global_git_view { ggv.nav_down(); }
+                    if let Some(ggv) = &mut self.global_git_view {
+                        ggv.nav_down();
+                    }
                 }
                 Action::GlobalGitSelect => self.do_global_git_select(),
                 Action::GlobalGitRemove => self.do_global_git_remove(),
-                Action::GitRepoInfoLoaded { path, branch, is_dirty } => {
+                Action::GitRepoInfoLoaded {
+                    path,
+                    branch,
+                    is_dirty,
+                } => {
                     if let Some(ggv) = &mut self.global_git_view {
                         ggv.on_repo_info_loaded(path, branch, is_dirty);
                     }
@@ -743,41 +733,81 @@ impl App {
 
                 // --- Git view tabs ---
                 Action::GitTabStatus => {
-                    if let Some(gv) = &mut self.git_view { gv.switch_tab(GitViewTab::Status); }
+                    if let Some(gv) = &mut self.git_view {
+                        gv.switch_tab(GitViewTab::Status);
+                    }
                 }
                 Action::GitTabLog => self.do_git_tab_log(),
                 Action::GitTabGraph => self.do_git_tab_graph(),
                 Action::GitTabReflog => self.do_git_tab_reflog(),
                 Action::GitTabDiff => self.do_git_tab_diff(),
                 Action::GitTabBlame => self.do_git_tab_blame(),
-                Action::GitCommitsLoaded { git_root: _, commits } => {
+                Action::GitCommitsLoaded {
+                    git_root: _,
+                    commits,
+                } => {
                     if let Some(gv) = &mut self.git_view {
                         gv.on_commits_loaded(commits);
                     }
                 }
-                Action::GitReflogLoaded { git_root: _, entries } => {
+                Action::GitReflogLoaded {
+                    git_root: _,
+                    entries,
+                } => {
                     if let Some(gv) = &mut self.git_view {
                         gv.on_reflog_loaded(entries);
                     }
                 }
-                Action::GitBlameLoaded { git_root: _, path, lines } => {
+                Action::GitBlameLoaded {
+                    git_root: _,
+                    path,
+                    lines,
+                } => {
                     if let Some(gv) = &mut self.git_view {
                         gv.on_blame_loaded(path, lines);
                     }
                 }
-                Action::GitDiffLoaded { git_root: _, path, lines } => {
+                Action::GitDiffLoaded {
+                    git_root: _,
+                    path,
+                    lines,
+                } => {
                     if let Some(gv) = &mut self.git_view {
                         gv.on_diff_loaded(path, lines);
                     }
                 }
 
-                _ => {}
+                // Help overlay
+                Action::Help => self.open_help(),
+                Action::HelpClose => {
+                    if self.mode == Mode::Help {
+                        self.mode = self.help_prior_mode;
+                    }
+                }
+                Action::HelpScrollUp => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Action::HelpScrollDown => self.scroll_help_down(1),
+                Action::HelpPageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(HELP_PAGE);
+                }
+                Action::HelpPageDown => self.scroll_help_down(HELP_PAGE),
             }
         }
         Ok(())
     }
 
     fn render(&mut self, tui: &mut Tui) -> color_eyre::Result<()> {
+        // With help open, the view underneath is drawn as it was.
+        let help_open = self.mode == Mode::Help;
+        let view_mode = if help_open {
+            self.help_prior_mode
+        } else {
+            self.mode
+        };
+        let view_chain = self.view_chain();
+        let bar_chain = KeyContext::chain(self.mode, self.dialog.as_ref());
+        let keymap = Arc::clone(&self.config.keymap);
+        let help_scroll = self.help_scroll;
+        let keyboard_enhanced = self.keyboard_enhanced;
         let left = &mut self.left;
         let right = &mut self.right;
         let active = self.active;
@@ -785,15 +815,18 @@ impl App {
         let last_error = &self.last_error;
         let git_view = &mut self.git_view;
         let cargo_view = &self.cargo_view;
-        let git_mode = matches!(self.mode, Mode::Git | Mode::GitCommit | Mode::GitBranch | Mode::GitTag);
-        let global_git_mode = self.mode == Mode::GlobalGit;
+        let git_mode = matches!(
+            view_mode,
+            Mode::Git | Mode::GitCommit | Mode::GitBranch | Mode::GitTag
+        );
+        let global_git_mode = view_mode == Mode::GlobalGit;
         let global_git_view = &mut self.global_git_view;
-        let cargo_mode = self.mode == Mode::Cargo;
+        let cargo_mode = view_mode == Mode::Cargo;
         let commit_textarea = &mut self.commit_textarea;
         let branch_list = &self.branch_list;
         let branch_cursor = self.branch_cursor;
-        let show_branches = self.mode == Mode::GitBranch;
-        let show_tags = self.mode == Mode::GitTag;
+        let show_branches = view_mode == Mode::GitBranch;
+        let show_tags = view_mode == Mode::GitTag;
         let tag_list = &self.tag_list;
         let tag_cursor = self.tag_cursor;
         let palette = &self.palette;
@@ -834,30 +867,50 @@ impl App {
                 left.draw(frame, left_area, palette);
                 right.draw(frame, right_area, palette);
 
-                let active_panel = if active == Side::Left { &*left } else { &*right };
-                draw_status_bar(frame, status_area, active_panel, last_error.as_deref(), palette);
+                let active_panel = if active == Side::Left {
+                    &*left
+                } else {
+                    &*right
+                };
+                draw_status_bar(
+                    frame,
+                    status_area,
+                    active_panel,
+                    last_error.as_deref(),
+                    palette,
+                );
 
                 if cargo_mode && let Some(cv) = cargo_view {
                     cv.draw(frame, panels_area, palette);
                 }
             }
 
-            let fb_mode = if global_git_mode {
-                FuncBarMode::GlobalGit
-            } else if git_mode {
-                FuncBarMode::Git
+            let bar_style = if global_git_mode || git_mode {
+                palette.funcbar_git
             } else if cargo_mode {
-                FuncBarMode::Cargo
+                palette.funcbar_cargo
             } else {
-                FuncBarMode::Normal
+                palette.funcbar_normal
             };
-            func_bar::draw(frame, func_area, fb_mode, palette);
+            func_bar::draw(frame, func_area, &keymap, bar_chain, bar_style);
 
             if let Some(d) = dialog {
                 dialog::draw(frame, d, area, palette);
             }
 
             draw_ops_overlay(frame, area, ops, palette);
+
+            if help_open {
+                help::draw(
+                    frame,
+                    panels_area,
+                    &keymap,
+                    view_chain,
+                    help_scroll,
+                    keyboard_enhanced,
+                    palette,
+                );
+            }
         })?;
         Ok(())
     }
@@ -898,8 +951,8 @@ impl App {
         Panel::load_dir(path, other, self.action_tx.clone());
     }
 
-    fn panel_page_height(&self, tui: &Tui) -> usize {
-        let total = tui.terminal.size().map(|s| s.height).unwrap_or(24);
+    fn panel_page_height(tui: &Tui) -> usize {
+        let total = tui.terminal.size().map_or(24, |s| s.height);
         (total.saturating_sub(5) as usize).max(1)
     }
 
@@ -919,7 +972,7 @@ impl App {
         let active = self.active;
         self.open_dialog(DialogState::input(
             "Copy",
-            format!("Copy {} to:", label),
+            format!("Copy {label} to:"),
             dest,
             Box::new(OpCopy { sources, active }),
         ));
@@ -939,7 +992,7 @@ impl App {
         let active = self.active;
         self.open_dialog(DialogState::input(
             "Move",
-            format!("Move {} to:", label),
+            format!("Move {label} to:"),
             dest,
             Box::new(OpMove { sources, active }),
         ));
@@ -958,7 +1011,10 @@ impl App {
             "Rename",
             format!("Rename '{}' to:", entry.name),
             prefill,
-            Box::new(OpMove { sources: vec![src], active }),
+            Box::new(OpMove {
+                sources: vec![src],
+                active,
+            }),
         ));
     }
 
@@ -983,8 +1039,7 @@ impl App {
                 "Delete '{}'?",
                 sources[0]
                     .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+                    .map_or_default(|n| n.to_string_lossy().into_owned())
             )
         } else {
             format!("Delete {} items?", sources.len())
@@ -993,7 +1048,10 @@ impl App {
         self.open_dialog(DialogState::confirm(
             "Delete",
             msg,
-            Box::new(OpDelete { paths: sources, active }),
+            Box::new(OpDelete {
+                paths: sources,
+                active,
+            }),
         ));
     }
 
@@ -1003,8 +1061,7 @@ impl App {
             .active_panel()
             .current_entry()
             .filter(|e| !e.is_dir && e.name != "..")
-            .map(|e| e.name.clone())
-            .unwrap_or_default();
+            .map_or_default(|e| e.name.clone());
         self.open_dialog(DialogState::input(
             "Open in Nano",
             format!("File in {}:", base.display()),
@@ -1028,8 +1085,11 @@ impl App {
 
         for p in &self.recent_dirs {
             items.push(
-                MenuItem::new(p.to_string_lossy().into_owned(), MenuAction::CdTo(p.clone()))
-                    .with_delete(MenuAction::RemoveRecent(p.clone())),
+                MenuItem::new(
+                    p.to_string_lossy().into_owned(),
+                    MenuAction::CdTo(p.clone()),
+                )
+                .with_delete(MenuAction::RemoveRecent(p.clone())),
             );
         }
 
@@ -1046,7 +1106,7 @@ impl App {
             .into_iter()
             .map(|(id, display)| {
                 let label = if id == current.as_str() {
-                    format!("{} ✓", display)
+                    format!("{display} ✓")
                 } else {
                     display.to_string()
                 };
@@ -1067,17 +1127,14 @@ impl App {
             .bookmarks
             .iter()
             .map(|p| {
-                MenuItem::new(
-                    format!("★ {}", p.display()),
-                    MenuAction::CdTo(p.clone()),
-                )
-                .with_delete(MenuAction::RemoveBookmark(p.clone()))
+                MenuItem::new(format!("★ {}", p.display()), MenuAction::CdTo(p.clone()))
+                    .with_delete(MenuAction::RemoveBookmark(p.clone()))
             })
             .collect();
 
         // File-operation items are only added when cursor is on a real entry.
         let entry = self.active_panel().current_entry();
-        let has_file = entry.as_ref().map(|e| e.name != "..").unwrap_or(false);
+        let has_file = entry.as_ref().is_some_and(|e| e.name != "..");
 
         let title = if has_file {
             format!("Actions: {}", entry.as_ref().unwrap().name)
@@ -1095,10 +1152,8 @@ impl App {
                 active_side,
                 entry,
             };
-            let file_items: Vec<MenuItem> = self.providers
-                .iter()
-                .flat_map(|p| p.items(&ctx))
-                .collect();
+            let file_items: Vec<MenuItem> =
+                self.providers.iter().flat_map(|p| p.items(&ctx)).collect();
             items.extend(file_items);
         }
 
@@ -1115,18 +1170,33 @@ impl App {
         let other_dir = self.get_panel(self.active.other()).path.clone();
         let active_side = self.active;
 
-        let ctx = if let Some(entry) = self.active_panel().current_entry().filter(|e| e.name != "..") {
+        let ctx = if let Some(entry) = self
+            .active_panel()
+            .current_entry()
+            .filter(|e| e.name != "..")
+        {
             let entry_path = panel_dir.join(&entry.name);
             let effective_targets = self.active_panel().effective_targets();
-            Some(MenuCtx { entry_path, panel_dir: panel_dir.clone(), other_dir: other_dir.clone(), active_side, effective_targets, entry: entry.clone() })
+            Some(MenuCtx {
+                entry_path,
+                panel_dir: panel_dir.clone(),
+                other_dir: other_dir.clone(),
+                active_side,
+                effective_targets,
+                entry: entry.clone(),
+            })
         } else {
             None
         };
 
-        let mut items: Vec<MenuItem> = self.user_commands
+        let mut items: Vec<MenuItem> = self
+            .user_commands
             .iter()
             .map(|template| {
-                let cmd = ctx.as_ref().map(|c| substitute_placeholders(template, c)).unwrap_or_else(|| template.clone());
+                let cmd = ctx.as_ref().map_or_else(
+                    || template.clone(),
+                    |c| substitute_placeholders(template, c),
+                );
                 MenuItem::new(template.clone(), MenuAction::RunUserCommand(cmd))
                     .with_delete(MenuAction::RemoveUserCommand(template.clone()))
             })
@@ -1138,6 +1208,33 @@ impl App {
         ));
 
         self.open_dialog(DialogState::context_menu("User Commands", items));
+    }
+
+    /// The context chain of the mode underneath the help overlay (or of the current mode).
+    fn view_chain(&self) -> &'static [KeyContext] {
+        let mode = if self.mode == Mode::Help {
+            self.help_prior_mode
+        } else {
+            self.mode
+        };
+        KeyContext::chain(mode, self.dialog.as_ref())
+    }
+
+    /// Opens help for the current mode, unless it is a text field (where `?` is text) or help is
+    /// already open.
+    fn open_help(&mut self) {
+        let chain = KeyContext::chain(self.mode, self.dialog.as_ref());
+        if self.mode == Mode::Help || chain[0].is_text_input() {
+            return;
+        }
+        self.help_prior_mode = self.mode;
+        self.help_scroll = 0;
+        self.mode = Mode::Help;
+    }
+
+    fn scroll_help_down(&mut self, lines: usize) {
+        let rows = help::rows(&self.config.keymap, self.view_chain()).len();
+        self.help_scroll = (self.help_scroll + lines).min(rows.saturating_sub(1));
     }
 
     fn open_dialog(&mut self, state: DialogState) {
@@ -1161,7 +1258,11 @@ impl App {
             }
             DialogState::Input { value, op, .. } => {
                 self.last_error = None;
-                self.mode = if op.stays_in_git_mode() { Mode::Git } else { Mode::Normal };
+                self.mode = if op.stays_in_git_mode() {
+                    Mode::Git
+                } else {
+                    Mode::Normal
+                };
                 self.execute_op(op, value);
             }
             DialogState::ContextMenu {
@@ -1197,7 +1298,10 @@ impl App {
     }
 
     fn dialog_delete_selected(&mut self) {
-        let delete_action = if let Some(DialogState::ContextMenu { items, selected, .. }) = &mut self.dialog {
+        let delete_action = if let Some(DialogState::ContextMenu {
+            items, selected, ..
+        }) = &mut self.dialog
+        {
             let idx = *selected;
             let Some(da) = items.get(idx).and_then(|i| i.delete_action.clone()) else {
                 return;
@@ -1212,7 +1316,8 @@ impl App {
         };
         self.execute_menu_action(delete_action);
         // Close the dialog if all deletable items are gone and nothing else remains.
-        if matches!(&self.dialog, Some(DialogState::ContextMenu { items, .. }) if items.is_empty()) {
+        if matches!(&self.dialog, Some(DialogState::ContextMenu { items, .. }) if items.is_empty())
+        {
             self.dialog = None;
             self.mode = self.dialog_prior_mode;
         }
@@ -1291,7 +1396,7 @@ impl App {
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
                     let result = tokio::process::Command::new("udisksctl")
-                        .args(["mount", "-b", &format!("/dev/{}", device)])
+                        .args(["mount", "-b", &format!("/dev/{device}")])
                         .output()
                         .await;
                     match result {
@@ -1320,7 +1425,7 @@ impl App {
                 let tx = self.action_tx.clone();
                 tokio::spawn(async move {
                     let result = tokio::process::Command::new("udisksctl")
-                        .args(["unmount", "-b", &format!("/dev/{}", device)])
+                        .args(["unmount", "-b", &format!("/dev/{device}")])
                         .output()
                         .await;
                     match result {
@@ -1336,7 +1441,11 @@ impl App {
                 });
             }
 
-            MenuAction::Chown { paths, current_owner, reload_sides } => {
+            MenuAction::Chown {
+                paths,
+                current_owner,
+                reload_sides,
+            } => {
                 self.open_dialog(DialogState::input(
                     "Change Owner",
                     format!(
@@ -1345,7 +1454,10 @@ impl App {
                         current_owner
                     ),
                     current_owner,
-                    Box::new(OpChown { paths, reload_sides }),
+                    Box::new(OpChown {
+                        paths,
+                        reload_sides,
+                    }),
                 ));
             }
             MenuAction::GitPush { follow_tags } => {
@@ -1364,7 +1476,11 @@ impl App {
                 recent_dirs::save(&get_data_dir(), &self.recent_dirs);
             }
             MenuAction::RunUserCommand(cmd) => {
-                self.pending_command = Some(("sh".into(), vec!["-c".into(), cmd], vec![self.active, self.active.other()]));
+                self.pending_command = Some((
+                    "sh".into(),
+                    vec!["-c".into(), cmd],
+                    vec![self.active, self.active.other()],
+                ));
             }
             MenuAction::AddUserCommand => {
                 self.open_dialog(DialogState::input(
@@ -1378,11 +1494,14 @@ impl App {
                 user_commands::remove(&mut self.user_commands, &template);
                 user_commands::save(&get_data_dir(), &self.user_commands);
             }
-            MenuAction::NewBranchInScope { git_root, recursive } => {
+            MenuAction::NewBranchInScope {
+                git_root,
+                recursive,
+            } => {
                 let submodule_paths = if recursive {
-                    self.git_view.as_ref()
-                        .map(|gv| gv.all_submodule_paths())
-                        .unwrap_or_default()
+                    self.git_view
+                        .as_ref()
+                        .map_or_default(super::components::git_view::GitView::all_submodule_paths)
                 } else {
                     vec![]
                 };
@@ -1396,7 +1515,10 @@ impl App {
                         "New Branch",
                         prompt,
                         String::new(),
-                        Box::new(OpGitCreateBranchRecursive { git_root, submodule_paths }),
+                        Box::new(OpGitCreateBranchRecursive {
+                            git_root,
+                            submodule_paths,
+                        }),
                     ));
                 } else {
                     self.open_dialog(DialogState::input(
@@ -1413,7 +1535,11 @@ impl App {
     fn make_op_ctx(&mut self, input: String) -> OpCtx {
         let op_id = self.next_op_id;
         self.next_op_id += 1;
-        OpCtx { tx: self.action_tx.clone(), op_id, input }
+        OpCtx {
+            tx: self.action_tx.clone(),
+            op_id,
+            input,
+        }
     }
 
     fn execute_op(&mut self, op: Box<dyn DeferredOp>, input: String) {
@@ -1431,27 +1557,47 @@ impl App {
         self.next_op_id += 1;
         let total = paths.len() as u64;
         tokio::spawn(async move {
-            let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: 0, total });
+            let _ = tx.send(Action::Progress {
+                id,
+                label: "Deleting…".into(),
+                done: 0,
+                total,
+            });
             for (i, path) in paths.iter().enumerate() {
                 if let Err(e) = delete_recursive(path).await {
                     let _ = tx.send(Action::ProgressDone(id));
                     let _ = tx.send(Action::OpError(e.to_string()));
                     return;
                 }
-                let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: (i + 1) as u64, total });
+                let _ = tx.send(Action::Progress {
+                    id,
+                    label: "Deleting…".into(),
+                    done: (i + 1) as u64,
+                    total,
+                });
             }
             let _ = tx.send(Action::ProgressDone(id));
             let _ = tx.send(Action::OpCompleted(vec![active]));
         });
     }
 
-    fn do_copy(&mut self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
+    fn do_copy(
+        &mut self,
+        sources: Vec<std::path::PathBuf>,
+        dest: std::path::PathBuf,
+        active: Side,
+    ) {
         let tx = self.action_tx.clone();
         let id = self.next_op_id;
         self.next_op_id += 1;
         let total = sources.len() as u64;
         tokio::spawn(async move {
-            let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: 0, total });
+            let _ = tx.send(Action::Progress {
+                id,
+                label: "Copying…".into(),
+                done: 0,
+                total,
+            });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
             for (i, src) in sources.iter().enumerate() {
@@ -1459,7 +1605,12 @@ impl App {
                     Ok(n) => n,
                     Err(e) => {
                         errors.push(format!("{}: {}", src.display(), e));
-                        let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
+                        let _ = tx.send(Action::Progress {
+                            id,
+                            label: "Copying…".into(),
+                            done: (i + 1) as u64,
+                            total,
+                        });
                         continue;
                     }
                 };
@@ -1468,7 +1619,12 @@ impl App {
                 } else {
                     succeeded += 1;
                 }
-                let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
+                let _ = tx.send(Action::Progress {
+                    id,
+                    label: "Copying…".into(),
+                    done: (i + 1) as u64,
+                    total,
+                });
             }
             let _ = tx.send(Action::ProgressDone(id));
             if succeeded > 0 {
@@ -1480,13 +1636,23 @@ impl App {
         });
     }
 
-    fn do_move(&mut self, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, active: Side) {
+    fn do_move(
+        &mut self,
+        sources: Vec<std::path::PathBuf>,
+        dest: std::path::PathBuf,
+        active: Side,
+    ) {
         let tx = self.action_tx.clone();
         let id = self.next_op_id;
         self.next_op_id += 1;
         let total = sources.len() as u64;
         tokio::spawn(async move {
-            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: 0, total });
+            let _ = tx.send(Action::Progress {
+                id,
+                label: "Moving…".into(),
+                done: 0,
+                total,
+            });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
             for (i, src) in sources.iter().enumerate() {
@@ -1494,7 +1660,12 @@ impl App {
                     Ok(n) => n,
                     Err(e) => {
                         errors.push(format!("{}: {}", src.display(), e));
-                        let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                        let _ = tx.send(Action::Progress {
+                            id,
+                            label: "Moving…".into(),
+                            done: (i + 1) as u64,
+                            total,
+                        });
                         continue;
                     }
                 };
@@ -1503,14 +1674,22 @@ impl App {
                     Ok(()) => succeeded += 1,
                     Err(e) => {
                         let detail = if e.raw_os_error() == Some(libc::EXDEV) {
-                            format!("{}: cannot move across filesystems (use Copy then Delete)", src.display())
+                            format!(
+                                "{}: cannot move across filesystems (use Copy then Delete)",
+                                src.display()
+                            )
                         } else {
                             format!("{}: {}", src.display(), e)
                         };
                         errors.push(detail);
                     }
                 }
-                let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                let _ = tx.send(Action::Progress {
+                    id,
+                    label: "Moving…".into(),
+                    done: (i + 1) as u64,
+                    total,
+                });
             }
             let _ = tx.send(Action::ProgressDone(id));
             if succeeded > 0 {
@@ -1538,7 +1717,9 @@ impl App {
     fn enter_git_mode(&mut self) {
         let panel = self.active_panel();
         let branch = panel.git_branch.clone().unwrap_or_default();
-        let Some(git_root) = find_git_root(&panel.path) else { return };
+        let Some(git_root) = find_git_root(&panel.path) else {
+            return;
+        };
         // Bookmark this repo in the global list.
         git_repos::add(&mut self.git_repos, git_root.clone());
         git_repos::save(&crate::config::get_data_dir(), &self.git_repos);
@@ -1588,7 +1769,7 @@ impl App {
     fn enter_global_git_mode(&mut self) {
         let repos = self.git_repos.clone();
         let ggv = GlobalGitView::new(repos.clone());
-        GlobalGitView::load_all_meta(repos, self.action_tx.clone());
+        GlobalGitView::load_all_meta(&repos, &self.action_tx);
         self.global_git_view = Some(ggv);
         self.mode = Mode::GlobalGit;
         self.last_error = None;
@@ -1600,13 +1781,21 @@ impl App {
     }
 
     fn do_global_git_select(&mut self) {
-        let Some(ggv) = &self.global_git_view else { return };
-        let Some(path) = ggv.selected_repo().cloned() else { return };
-        let _ = self.action_tx.send(Action::EnterGitModeForRepo { git_root: path });
+        let Some(ggv) = &self.global_git_view else {
+            return;
+        };
+        let Some(path) = ggv.selected_repo().cloned() else {
+            return;
+        };
+        let _ = self
+            .action_tx
+            .send(Action::EnterGitModeForRepo { git_root: path });
     }
 
     fn do_global_git_remove(&mut self) {
-        let Some(ggv) = &mut self.global_git_view else { return };
+        let Some(ggv) = &mut self.global_git_view else {
+            return;
+        };
         if let Some(removed) = ggv.remove_selected() {
             git_repos::remove(&mut self.git_repos, &removed);
             git_repos::save(&crate::config::get_data_dir(), &self.git_repos);
@@ -1644,10 +1833,11 @@ impl App {
         let Some(gv) = &mut self.git_view else { return };
         let path = gv.status_cursor_path();
         if let Some(p) = path
-            && gv.diff_path.as_deref() != Some(&p) {
-                let git_root = gv.git_root.clone();
-                GitView::load_diff(git_root, p, self.action_tx.clone());
-            }
+            && gv.diff_path.as_deref() != Some(&p)
+        {
+            let git_root = gv.git_root.clone();
+            GitView::load_diff(git_root, p, self.action_tx.clone());
+        }
         gv.switch_tab(GitViewTab::Diff);
     }
 
@@ -1655,15 +1845,18 @@ impl App {
         let Some(gv) = &mut self.git_view else { return };
         let path = gv.status_cursor_path();
         if let Some(p) = path
-            && gv.blame_path.as_deref() != Some(&p) {
-                let git_root = gv.git_root.clone();
-                GitView::load_blame(git_root, p, self.action_tx.clone());
-            }
+            && gv.blame_path.as_deref() != Some(&p)
+        {
+            let git_root = gv.git_root.clone();
+            GitView::load_blame(git_root, p, self.action_tx.clone());
+        }
         gv.switch_tab(GitViewTab::Blame);
     }
 
     fn enter_cargo_mode(&mut self) {
-        let Some(root) = self.active_panel().cargo_root.clone() else { return };
+        let Some(root) = self.active_panel().cargo_root.clone() else {
+            return;
+        };
         self.cargo_view = Some(CargoView::new(root));
         self.mode = Mode::Cargo;
         self.last_error = None;
@@ -1681,7 +1874,7 @@ impl App {
 
         let root_str = cargo_root.to_string_lossy().into_owned();
         let escaped_root = root_str.replace('\'', "'\\''");
-        let sh_cmd = format!("cd '{}' && {}", escaped_root, shell_cmd);
+        let sh_cmd = format!("cd '{escaped_root}' && {shell_cmd}");
 
         self.mode = Mode::Normal;
         self.cargo_view = None;
@@ -1691,7 +1884,9 @@ impl App {
     fn do_git_stage(&mut self) {
         let Some(gv) = &self.git_view else { return };
         let targets = gv.stage_targets();
-        if targets.is_empty() { return; }
+        if targets.is_empty() {
+            return;
+        }
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
@@ -1712,7 +1907,9 @@ impl App {
     fn do_git_unstage(&mut self) {
         let Some(gv) = &self.git_view else { return };
         let targets = gv.unstage_targets();
-        if targets.is_empty() { return; }
+        if targets.is_empty() {
+            return;
+        }
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
         tokio::spawn(async move {
@@ -1784,15 +1981,23 @@ impl App {
             })
             .await;
             match result {
-                Ok(Ok(())) => { let _ = tx.send(Action::GitAddAllDone); }
-                Ok(Err(e)) => { let _ = tx.send(Action::OpError(e.to_string())); }
-                Err(e)     => { let _ = tx.send(Action::OpError(e.to_string())); }
+                Ok(Ok(())) => {
+                    let _ = tx.send(Action::GitAddAllDone);
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(Action::OpError(e.to_string()));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::OpError(e.to_string()));
+                }
             }
         });
     }
 
     fn submit_git_commit(&mut self) {
-        let Some(ta) = self.commit_textarea.take() else { return };
+        let Some(ta) = self.commit_textarea.take() else {
+            return;
+        };
         self.mode = Mode::Git;
         let msg = ta.lines().join("\n");
         if msg.trim().is_empty() {
@@ -1805,8 +2010,11 @@ impl App {
 
         if self.super_commit {
             self.super_commit = false;
-            let dirty_sub_paths: Vec<std::path::PathBuf> =
-                gv.dirty_submodules().into_iter().map(|s| s.abs_path.clone()).collect();
+            let dirty_sub_paths: Vec<std::path::PathBuf> = gv
+                .dirty_submodules()
+                .into_iter()
+                .map(|s| s.abs_path.clone())
+                .collect();
             tokio::spawn(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     for sub_path in &dirty_sub_paths {
@@ -1816,11 +2024,8 @@ impl App {
                         index.update_all(["."].iter(), None)?;
                         index.write()?;
                         let tree_id = index.write_tree()?;
-                        let parent =
-                            sub_repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-                        let needs_commit = parent.as_ref()
-                            .map(|p| p.tree_id() != tree_id)
-                            .unwrap_or(true);
+                        let parent = sub_repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+                        let needs_commit = parent.as_ref().is_none_or(|p| p.tree_id() != tree_id);
                         if needs_commit {
                             let sig = sub_repo.signature()?;
                             let tree = sub_repo.find_tree(tree_id)?;
@@ -1876,7 +2081,10 @@ impl App {
         self.open_dialog(DialogState::context_menu(
             "Push",
             vec![
-                MenuItem::new("Push branch only", MenuAction::GitPush { follow_tags: false }),
+                MenuItem::new(
+                    "Push branch only",
+                    MenuAction::GitPush { follow_tags: false },
+                ),
                 MenuItem::new(
                     "Push branch + annotated tags (--follow-tags)",
                     MenuAction::GitPush { follow_tags: true },
@@ -1891,17 +2099,22 @@ impl App {
         let tx = self.action_tx.clone();
         let id = self.next_op_id;
         self.next_op_id += 1;
-        let label = if follow_tags { "Pushing (with tags)…" } else { "Pushing…" };
-        let _ = tx.send(Action::Progress { id, label: label.into(), done: 0, total: 0 });
+        let label = if follow_tags {
+            "Pushing (with tags)…"
+        } else {
+            "Pushing…"
+        };
+        let _ = tx.send(Action::Progress {
+            id,
+            label: label.into(),
+            done: 0,
+            total: 0,
+        });
         tokio::spawn(async move {
             let tx_inner = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let repo = git2::Repository::open(&git_root)?;
-                let branch = repo
-                    .head()?
-                    .shorthand()
-                    .unwrap_or("main")
-                    .to_owned();
+                let branch = repo.head()?.shorthand().unwrap_or("main").to_owned();
                 let mut remote = repo.find_remote("origin")?;
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(git2_cred_callback);
@@ -1916,7 +2129,7 @@ impl App {
                 });
                 let mut push_opts = git2::PushOptions::new();
                 push_opts.remote_callbacks(callbacks);
-                let branch_refspec = format!("refs/heads/{0}:refs/heads/{0}", branch);
+                let branch_refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
                 let mut refspecs: Vec<String> = vec![branch_refspec];
                 if follow_tags {
                     // Push all annotated tags whose target commits are reachable.
@@ -1941,16 +2154,17 @@ impl App {
         let tx = self.action_tx.clone();
         let id = self.next_op_id;
         self.next_op_id += 1;
-        let _ = tx.send(Action::Progress { id, label: "Pulling…".into(), done: 0, total: 0 });
+        let _ = tx.send(Action::Progress {
+            id,
+            label: "Pulling…".into(),
+            done: 0,
+            total: 0,
+        });
         tokio::spawn(async move {
             let tx_inner = tx.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let repo = git2::Repository::open(&git_root)?;
-                let branch = repo
-                    .head()?
-                    .shorthand()
-                    .unwrap_or("main")
-                    .to_owned();
+                let branch = repo.head()?.shorthand().unwrap_or("main").to_owned();
                 let mut remote = repo.find_remote("origin")?;
                 let mut callbacks = git2::RemoteCallbacks::new();
                 callbacks.credentials(git2_cred_callback);
@@ -1976,13 +2190,11 @@ impl App {
                     return Ok(());
                 }
                 if analysis.is_fast_forward() {
-                    let refname = format!("refs/heads/{}", branch);
+                    let refname = format!("refs/heads/{branch}");
                     let mut reference = repo.find_reference(&refname)?;
                     reference.set_target(fetch_commit.id(), "pull: Fast-forward")?;
                     repo.set_head(&refname)?;
-                    repo.checkout_head(Some(
-                        git2::build::CheckoutBuilder::default().force(),
-                    ))?;
+                    repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))?;
                 } else {
                     return Err(git2::Error::from_str(
                         "pull requires a merge commit — not supported here",
@@ -1999,26 +2211,32 @@ impl App {
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         self.branch_list.clear();
-        if !gv.submodule_statuses.is_empty() {
-            self.open_dialog(DialogState::context_menu(
-                "New Branch — Scope",
-                vec![
-                    MenuItem::new(
-                        "Parent repository only",
-                        MenuAction::NewBranchInScope { git_root: git_root.clone(), recursive: false },
-                    ),
-                    MenuItem::new(
-                        "Parent + all submodules",
-                        MenuAction::NewBranchInScope { git_root, recursive: true },
-                    ),
-                ],
-            ));
-        } else {
+        if gv.submodule_statuses.is_empty() {
             self.open_dialog(DialogState::input(
                 "New Branch",
                 "Branch name:",
                 String::new(),
                 Box::new(OpGitCreateBranch { git_root }),
+            ));
+        } else {
+            self.open_dialog(DialogState::context_menu(
+                "New Branch — Scope",
+                vec![
+                    MenuItem::new(
+                        "Parent repository only",
+                        MenuAction::NewBranchInScope {
+                            git_root: git_root.clone(),
+                            recursive: false,
+                        },
+                    ),
+                    MenuItem::new(
+                        "Parent + all submodules",
+                        MenuAction::NewBranchInScope {
+                            git_root,
+                            recursive: true,
+                        },
+                    ),
+                ],
             ));
         }
     }
@@ -2029,7 +2247,9 @@ impl App {
     }
 
     fn do_git_checkout_branch(&mut self) {
-        let Some(info) = self.branch_list.get(self.branch_cursor).cloned() else { return };
+        let Some(info) = self.branch_list.get(self.branch_cursor).cloned() else {
+            return;
+        };
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
@@ -2040,8 +2260,7 @@ impl App {
                 let repo = git2::Repository::open(&git_root)?;
                 if info.is_local {
                     // Checkout existing local branch.
-                    let obj =
-                        repo.revparse_single(&format!("refs/heads/{}", info.name))?;
+                    let obj = repo.revparse_single(&format!("refs/heads/{}", info.name))?;
                     repo.checkout_tree(&obj, None)?;
                     repo.set_head(&format!("refs/heads/{}", info.name))?;
                 } else {
@@ -2055,8 +2274,7 @@ impl App {
                     let commit = remote_branch.get().peel_to_commit()?;
                     let mut local = repo.branch(&info.name, &commit, false)?;
                     local.set_upstream(Some(&remote_ref_owned))?;
-                    let obj =
-                        repo.revparse_single(&format!("refs/heads/{}", info.name))?;
+                    let obj = repo.revparse_single(&format!("refs/heads/{}", info.name))?;
                     repo.checkout_tree(&obj, None)?;
                     repo.set_head(&format!("refs/heads/{}", info.name))?;
                 }
@@ -2093,24 +2311,26 @@ impl App {
                         .unwrap_or("")
                         .trim_start_matches("refs/tags/")
                         .to_owned();
-                    let (is_annotated, target_id, message) =
-                        if let Ok(tag_obj) = repo.find_tag(oid) {
-                            let msg = tag_obj
-                                .message()
-                                .ok()
-                                .flatten()
-                                .map(|m| m.trim().to_owned())
-                                .filter(|m| !m.is_empty());
-                            let target = tag_obj
-                                .target_id()
-                                .to_string()[..8]
-                                .to_owned();
-                            (true, target, msg)
-                        } else {
-                            // Lightweight tag: the oid IS the commit oid.
-                            (false, oid.to_string()[..8].to_owned(), None)
-                        };
-                    tags.push(TagInfo { name, is_annotated, target_id, message });
+                    let (is_annotated, target_id, message) = if let Ok(tag_obj) = repo.find_tag(oid)
+                    {
+                        let msg = tag_obj
+                            .message()
+                            .ok()
+                            .flatten()
+                            .map(|m| m.trim().to_owned())
+                            .filter(|m| !m.is_empty());
+                        let target = tag_obj.target_id().to_string()[..8].to_owned();
+                        (true, target, msg)
+                    } else {
+                        // Lightweight tag: the oid IS the commit oid.
+                        (false, oid.to_string()[..8].to_owned(), None)
+                    };
+                    tags.push(TagInfo {
+                        name,
+                        is_annotated,
+                        target_id,
+                        message,
+                    });
                     true
                 })?;
                 // Sort alphabetically; newest tags tend to have higher version strings.
@@ -2119,15 +2339,23 @@ impl App {
             })
             .await;
             match result {
-                Ok(Ok(tags)) => { let _ = tx.send(Action::GitTagsLoaded { tags }); }
-                Ok(Err(e)) => { let _ = tx.send(Action::OpError(e.to_string())); }
-                Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
+                Ok(Ok(tags)) => {
+                    let _ = tx.send(Action::GitTagsLoaded { tags });
+                }
+                Ok(Err(e)) => {
+                    let _ = tx.send(Action::OpError(e.to_string()));
+                }
+                Err(e) => {
+                    let _ = tx.send(Action::OpError(e.to_string()));
+                }
             }
         });
     }
 
     fn do_git_checkout_tag(&mut self) {
-        let Some(info) = self.tag_list.get(self.tag_cursor).cloned() else { return };
+        let Some(info) = self.tag_list.get(self.tag_cursor).cloned() else {
+            return;
+        };
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
@@ -2150,7 +2378,9 @@ impl App {
     }
 
     fn do_git_delete_tag(&mut self) {
-        let Some(info) = self.tag_list.get(self.tag_cursor).cloned() else { return };
+        let Some(info) = self.tag_list.get(self.tag_cursor).cloned() else {
+            return;
+        };
         let Some(gv) = &self.git_view else { return };
         let git_root = gv.git_root.clone();
         let tx = self.action_tx.clone();
@@ -2182,14 +2412,24 @@ impl DeferredOp for OpDelete {
         let id = ctx.op_id;
         let total = self.paths.len() as u64;
         tokio::spawn(async move {
-            let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: 0, total });
+            let _ = tx.send(Action::Progress {
+                id,
+                label: "Deleting…".into(),
+                done: 0,
+                total,
+            });
             for (i, path) in self.paths.iter().enumerate() {
                 if let Err(e) = delete_recursive(path).await {
                     let _ = tx.send(Action::ProgressDone(id));
                     let _ = tx.send(Action::OpError(e.to_string()));
                     return;
                 }
-                let _ = tx.send(Action::Progress { id, label: "Deleting…".into(), done: (i + 1) as u64, total });
+                let _ = tx.send(Action::Progress {
+                    id,
+                    label: "Deleting…".into(),
+                    done: (i + 1) as u64,
+                    total,
+                });
             }
             let _ = tx.send(Action::ProgressDone(id));
             let _ = tx.send(Action::OpCompleted(vec![active]));
@@ -2210,7 +2450,12 @@ impl DeferredOp for OpCopy {
         let id = ctx.op_id;
         let total = self.sources.len() as u64;
         tokio::spawn(async move {
-            let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: 0, total });
+            let _ = tx.send(Action::Progress {
+                id,
+                label: "Copying…".into(),
+                done: 0,
+                total,
+            });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
             for (i, src) in self.sources.iter().enumerate() {
@@ -2218,7 +2463,12 @@ impl DeferredOp for OpCopy {
                     Ok(n) => n,
                     Err(e) => {
                         errors.push(format!("{}: {}", src.display(), e));
-                        let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
+                        let _ = tx.send(Action::Progress {
+                            id,
+                            label: "Copying…".into(),
+                            done: (i + 1) as u64,
+                            total,
+                        });
                         continue;
                     }
                 };
@@ -2227,7 +2477,12 @@ impl DeferredOp for OpCopy {
                 } else {
                     succeeded += 1;
                 }
-                let _ = tx.send(Action::Progress { id, label: "Copying…".into(), done: (i + 1) as u64, total });
+                let _ = tx.send(Action::Progress {
+                    id,
+                    label: "Copying…".into(),
+                    done: (i + 1) as u64,
+                    total,
+                });
             }
             let _ = tx.send(Action::ProgressDone(id));
             if succeeded > 0 {
@@ -2255,25 +2510,42 @@ impl DeferredOp for OpMove {
         // A bare name (no path separator) means rename in the source's own directory.
         let rename_in_place = dest.parent().is_none_or(|p| p == std::path::Path::new(""));
         tokio::spawn(async move {
-            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: 0, total });
+            let _ = tx.send(Action::Progress {
+                id,
+                label: "Moving…".into(),
+                done: 0,
+                total,
+            });
             let mut errors: Vec<String> = Vec::new();
             let mut succeeded = 0usize;
             for (i, src) in self.sources.iter().enumerate() {
                 let dest_full = if rename_in_place {
-                    match src.parent() {
-                        Some(parent) => parent.join(&dest),
-                        None => {
-                            errors.push(format!("{}: cannot determine parent directory", src.display()));
-                            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
-                            continue;
-                        }
+                    if let Some(parent) = src.parent() {
+                        parent.join(&dest)
+                    } else {
+                        errors.push(format!(
+                            "{}: cannot determine parent directory",
+                            src.display()
+                        ));
+                        let _ = tx.send(Action::Progress {
+                            id,
+                            label: "Moving…".into(),
+                            done: (i + 1) as u64,
+                            total,
+                        });
+                        continue;
                     }
                 } else {
                     let name = match file_name_of(src) {
                         Ok(n) => n,
                         Err(e) => {
                             errors.push(format!("{}: {}", src.display(), e));
-                            let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                            let _ = tx.send(Action::Progress {
+                                id,
+                                label: "Moving…".into(),
+                                done: (i + 1) as u64,
+                                total,
+                            });
                             continue;
                         }
                     };
@@ -2283,14 +2555,22 @@ impl DeferredOp for OpMove {
                     Ok(()) => succeeded += 1,
                     Err(e) => {
                         let detail = if e.raw_os_error() == Some(libc::EXDEV) {
-                            format!("{}: cannot move across filesystems (use Copy then Delete)", src.display())
+                            format!(
+                                "{}: cannot move across filesystems (use Copy then Delete)",
+                                src.display()
+                            )
                         } else {
                             format!("{}: {}", src.display(), e)
                         };
                         errors.push(detail);
                     }
                 }
-                let _ = tx.send(Action::Progress { id, label: "Moving…".into(), done: (i + 1) as u64, total });
+                let _ = tx.send(Action::Progress {
+                    id,
+                    label: "Moving…".into(),
+                    done: (i + 1) as u64,
+                    total,
+                });
             }
             let _ = tx.send(Action::ProgressDone(id));
             if succeeded > 0 {
@@ -2348,14 +2628,16 @@ fn shell_quote(s: &str) -> String {
 
 /// Substitute `{file}`, `{files}`, `{dir}`, `{other}` placeholders in a command template.
 fn substitute_placeholders(template: &str, ctx: &MenuCtx) -> String {
-    let file = ctx.effective_targets.first()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ctx.panel_dir.to_string_lossy().into_owned());
+    let file = ctx.effective_targets.first().map_or_else(
+        || ctx.panel_dir.to_string_lossy().into_owned(),
+        |p| p.to_string_lossy().into_owned(),
+    );
 
     let files = if ctx.effective_targets.is_empty() {
         shell_quote(&ctx.panel_dir.to_string_lossy())
     } else {
-        ctx.effective_targets.iter()
+        ctx.effective_targets
+            .iter()
             .map(|p| shell_quote(&p.to_string_lossy()))
             .collect::<Vec<_>>()
             .join(" ")
@@ -2388,7 +2670,11 @@ impl DeferredOp for OpExecute {
     fn execute(self: Box<Self>, ctx: OpCtx) {
         let cmd = self.path.to_string_lossy().into_owned();
         let args: Vec<String> = ctx.input.split_whitespace().map(String::from).collect();
-        let _ = ctx.tx.send(Action::ExecuteFile { cmd, args, reload: vec![] });
+        let _ = ctx.tx.send(Action::ExecuteFile {
+            cmd,
+            args,
+            reload: vec![],
+        });
     }
 }
 
@@ -2422,11 +2708,15 @@ struct OpGitCreateBranch {
     git_root: std::path::PathBuf,
 }
 impl DeferredOp for OpGitCreateBranch {
-    fn stays_in_git_mode(&self) -> bool { true }
+    fn stays_in_git_mode(&self) -> bool {
+        true
+    }
 
     fn execute(self: Box<Self>, ctx: OpCtx) {
         let name = ctx.input.trim().to_owned();
-        if name.is_empty() { return; }
+        if name.is_empty() {
+            return;
+        }
         let tx = ctx.tx;
         let git_root = self.git_root;
         tokio::spawn(async move {
@@ -2435,11 +2725,11 @@ impl DeferredOp for OpGitCreateBranch {
                 let head_commit = repo.head()?.peel_to_commit()?;
                 let mut branch = repo.branch(&name, &head_commit, false)?;
                 if repo.find_remote("origin").is_ok() {
-                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                    let _ = branch.set_upstream(Some(&format!("origin/{name}")));
                 }
-                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                let obj = repo.revparse_single(&format!("refs/heads/{name}"))?;
                 repo.checkout_tree(&obj, None)?;
-                repo.set_head(&format!("refs/heads/{}", name))?;
+                repo.set_head(&format!("refs/heads/{name}"))?;
                 Ok::<_, git2::Error>(())
             })
             .await;
@@ -2454,11 +2744,15 @@ struct OpGitCreateBranchRecursive {
     submodule_paths: Vec<std::path::PathBuf>,
 }
 impl DeferredOp for OpGitCreateBranchRecursive {
-    fn stays_in_git_mode(&self) -> bool { true }
+    fn stays_in_git_mode(&self) -> bool {
+        true
+    }
 
     fn execute(self: Box<Self>, ctx: OpCtx) {
         let name = ctx.input.trim().to_owned();
-        if name.is_empty() { return; }
+        if name.is_empty() {
+            return;
+        }
         let tx = ctx.tx;
         let git_root = self.git_root;
         let submodule_paths = self.submodule_paths;
@@ -2469,26 +2763,27 @@ impl DeferredOp for OpGitCreateBranchRecursive {
                 let head_commit = repo.head()?.peel_to_commit()?;
                 let mut branch = repo.branch(&name, &head_commit, false)?;
                 if repo.find_remote("origin").is_ok() {
-                    let _ = branch.set_upstream(Some(&format!("origin/{}", name)));
+                    let _ = branch.set_upstream(Some(&format!("origin/{name}")));
                 }
-                let obj = repo.revparse_single(&format!("refs/heads/{}", name))?;
+                let obj = repo.revparse_single(&format!("refs/heads/{name}"))?;
                 repo.checkout_tree(&obj, None)?;
-                repo.set_head(&format!("refs/heads/{}", name))?;
+                repo.set_head(&format!("refs/heads/{name}"))?;
                 // Best-effort: create and checkout the same branch in each submodule.
                 for sub_path in &submodule_paths {
                     if let Ok(sub_repo) = git2::Repository::open(sub_path)
-                        && let Ok(commit) = sub_repo.head().and_then(|h| h.peel_to_commit()) {
-                            let created = sub_repo.branch(&name, &commit, false).is_ok();
-                            // If it already existed, just check it out.
-                            let branch_exists = created || sub_repo
-                                .find_branch(&name, git2::BranchType::Local)
-                                .is_ok();
-                            if branch_exists
-                                && let Ok(obj) = sub_repo.revparse_single(&format!("refs/heads/{}", name)) {
-                                    let _ = sub_repo.checkout_tree(&obj, None);
-                                    let _ = sub_repo.set_head(&format!("refs/heads/{}", name));
-                                }
+                        && let Ok(commit) = sub_repo.head().and_then(|h| h.peel_to_commit())
+                    {
+                        let created = sub_repo.branch(&name, &commit, false).is_ok();
+                        // If it already existed, just check it out.
+                        let branch_exists =
+                            created || sub_repo.find_branch(&name, git2::BranchType::Local).is_ok();
+                        if branch_exists
+                            && let Ok(obj) = sub_repo.revparse_single(&format!("refs/heads/{name}"))
+                        {
+                            let _ = sub_repo.checkout_tree(&obj, None);
+                            let _ = sub_repo.set_head(&format!("refs/heads/{name}"));
                         }
+                    }
                 }
                 Ok::<_, git2::Error>(())
             })
@@ -2503,12 +2798,19 @@ struct OpGitTagName {
     git_root: std::path::PathBuf,
 }
 impl DeferredOp for OpGitTagName {
-    fn stays_in_git_mode(&self) -> bool { true }
+    fn stays_in_git_mode(&self) -> bool {
+        true
+    }
 
     fn execute(self: Box<Self>, ctx: OpCtx) {
         let name = ctx.input.trim().to_owned();
-        if name.is_empty() { return; }
-        let _ = ctx.tx.send(Action::GitTagNameChosen { git_root: self.git_root, name });
+        if name.is_empty() {
+            return;
+        }
+        let _ = ctx.tx.send(Action::GitTagNameChosen {
+            git_root: self.git_root,
+            name,
+        });
     }
 }
 
@@ -2518,7 +2820,9 @@ struct OpGitCreateTag {
     name: String,
 }
 impl DeferredOp for OpGitCreateTag {
-    fn stays_in_git_mode(&self) -> bool { true }
+    fn stays_in_git_mode(&self) -> bool {
+        true
+    }
 
     fn execute(self: Box<Self>, ctx: OpCtx) {
         let message = ctx.input.trim().to_owned();
@@ -2554,8 +2858,6 @@ fn draw_status_bar(
     error: Option<&str>,
     palette: &Palette,
 ) {
-    use ratatui::widgets::Paragraph;
-
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(palette.status_error), area);
         return;
@@ -2571,10 +2873,10 @@ fn draw_status_bar(
         String::new()
     };
 
-    let filter_text = if !panel.filter.is_empty() {
-        format!(" [filter: {}]", panel.filter)
-    } else {
+    let filter_text = if panel.filter.is_empty() {
         String::new()
+    } else {
+        format!(" [filter: {}]", panel.filter)
     };
 
     let right_text = if let Some((count, size)) = panel.marked_summary() {
@@ -2591,7 +2893,7 @@ fn draw_status_bar(
         Layout::horizontal([Constraint::Min(0), Constraint::Length(right_w)]).areas(area);
 
     frame.render_widget(
-        Paragraph::new(format!("{}{}", left_text, filter_text)).style(palette.status_normal),
+        Paragraph::new(format!("{left_text}{filter_text}")).style(palette.status_normal),
         left_area,
     );
     frame.render_widget(
@@ -2609,8 +2911,6 @@ fn draw_git_status_bar(
     error: Option<&str>,
     palette: &Palette,
 ) {
-    use ratatui::widgets::Paragraph;
-
     if let Some(err) = error {
         frame.render_widget(Paragraph::new(err).style(palette.status_error), area);
         return;
@@ -2621,7 +2921,10 @@ fn draw_git_status_bar(
     let hint_w = hint.len() as u16;
     let [left_area, right_area] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(hint_w)]).areas(area);
-    frame.render_widget(Paragraph::new(left).style(palette.git_status_bar), left_area);
+    frame.render_widget(
+        Paragraph::new(left).style(palette.git_status_bar),
+        left_area,
+    );
     frame.render_widget(
         Paragraph::new(hint)
             .alignment(Alignment::Right)
@@ -2633,7 +2936,7 @@ fn draw_git_status_bar(
 fn find_git_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
     git2::Repository::discover(start)
         .ok()
-        .and_then(|r| r.workdir().map(|p| p.to_path_buf()))
+        .and_then(|r| r.workdir().map(std::path::Path::to_path_buf))
 }
 
 fn git2_cred_callback(
@@ -2669,9 +2972,15 @@ fn git_op_result(
     tx: &tokio::sync::mpsc::UnboundedSender<Action>,
 ) {
     match result {
-        Ok(Ok(())) => { let _ = tx.send(Action::GitOpCompleted); }
-        Ok(Err(e)) => { let _ = tx.send(Action::OpError(e.to_string())); }
-        Err(e) => { let _ = tx.send(Action::OpError(e.to_string())); }
+        Ok(Ok(())) => {
+            let _ = tx.send(Action::GitOpCompleted);
+        }
+        Ok(Err(e)) => {
+            let _ = tx.send(Action::OpError(e.to_string()));
+        }
+        Err(e) => {
+            let _ = tx.send(Action::OpError(e.to_string()));
+        }
     }
 }
 
@@ -2702,7 +3011,11 @@ fn draw_branch_popup(
 
     // Leave one line at the bottom for a local/remote legend.
     let list_h = inner.height.saturating_sub(1) as usize;
-    let offset = if cursor < list_h { 0 } else { cursor + 1 - list_h };
+    let offset = if cursor < list_h {
+        0
+    } else {
+        cursor + 1 - list_h
+    };
 
     let items: Vec<ListItem> = branches
         .iter()
@@ -2730,14 +3043,16 @@ fn draw_branch_popup(
         width: inner.width,
         height: 1,
     };
-    use ratatui::widgets::Paragraph;
     frame.render_widget(
         Paragraph::new("  > current  [local] local branch  [remote] remote-only")
             .style(Style::default().add_modifier(Modifier::DIM)),
         legend_area,
     );
 
-    let list_area = Rect { height: list_h as u16, ..inner };
+    let list_area = Rect {
+        height: list_h as u16,
+        ..inner
+    };
     frame.render_widget(List::new(items), list_area);
 }
 
@@ -2761,7 +3076,6 @@ fn draw_tag_popup(
     frame.render_widget(block, popup);
 
     if tags.is_empty() {
-        use ratatui::widgets::Paragraph;
         frame.render_widget(
             Paragraph::new("  No tags in this repository.")
                 .style(Style::default().add_modifier(Modifier::DIM)),
@@ -2772,7 +3086,11 @@ fn draw_tag_popup(
 
     let legend_h = 1usize;
     let list_h = inner.height.saturating_sub(legend_h as u16) as usize;
-    let offset = if cursor < list_h { 0 } else { cursor + 1 - list_h };
+    let offset = if cursor < list_h {
+        0
+    } else {
+        cursor + 1 - list_h
+    };
 
     let items: Vec<ListItem> = tags
         .iter()
@@ -2780,16 +3098,16 @@ fn draw_tag_popup(
         .skip(offset)
         .take(list_h)
         .map(|(i, t)| {
-            let kind = if t.is_annotated { "annotated" } else { "lightweight" };
-            let msg_hint = t
-                .message
-                .as_deref()
-                .map(|m| {
-                    let short: String = m.chars().take(30).collect();
-                    format!("  {}", short)
-                })
-                .unwrap_or_default();
-            let label = format!(" [{}] {}  {}{}",  kind, t.target_id, t.name, msg_hint);
+            let kind = if t.is_annotated {
+                "annotated"
+            } else {
+                "lightweight"
+            };
+            let msg_hint = t.message.as_deref().map_or_default(|m| {
+                let short: String = m.chars().take(30).collect();
+                format!("  {short}")
+            });
+            let label = format!(" [{}] {}  {}{}", kind, t.target_id, t.name, msg_hint);
             let style = if i == cursor {
                 Style::default().add_modifier(Modifier::REVERSED)
             } else {
@@ -2805,14 +3123,16 @@ fn draw_tag_popup(
         width: inner.width,
         height: 1,
     };
-    use ratatui::widgets::Paragraph;
     frame.render_widget(
         Paragraph::new("  [annotated] has message  [lightweight] points directly to commit")
             .style(Style::default().add_modifier(Modifier::DIM)),
         legend_area,
     );
 
-    let list_area = Rect { height: list_h as u16, ..inner };
+    let list_area = Rect {
+        height: list_h as u16,
+        ..inner
+    };
     frame.render_widget(List::new(items), list_area);
 }
 
@@ -2824,13 +3144,12 @@ fn draw_ops_overlay(
 ) {
     use ratatui::widgets::{Block, Borders, Paragraph};
 
-    let n = ops.len() as u16;
-    if n == 0 {
+    if ops.is_empty() {
         return;
     }
 
     let width = 44u16.min(area.width);
-    let height = n + 2;
+    let height = ops.len() as u16 + 2;
     let x = area.x + area.width.saturating_sub(width);
     let y = area.y + area.height.saturating_sub(height);
     let popup = Rect::new(x, y, width, height);
@@ -2846,16 +3165,15 @@ fn draw_ops_overlay(
     for (i, (_, label, done, total)) in ops.iter().enumerate() {
         let row = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
         let text = if *total == 0 {
-            label.to_string()
+            label.clone()
         } else {
-            let t = (*total).max(1);
-            let d = *done;
+            let total = (*total).max(1);
             let bar_w = inner.width.saturating_sub(label.len() as u16 + 7) as usize;
-            let filled = (bar_w as u64 * d / t) as usize;
+            let filled = (bar_w as u64 * done / total) as usize;
             let empty = bar_w.saturating_sub(filled);
             format!(
                 "{label} {:>3}% {}{}",
-                d * 100 / t,
+                done * 100 / total,
                 "█".repeat(filled),
                 "░".repeat(empty)
             )
@@ -2882,25 +3200,34 @@ fn start_git_watcher(
     use std::sync::mpsc as std_mpsc;
     use std::time::{Duration, Instant};
 
+    // Debounce: wait until 200 ms of silence before firing GitReload.
+    const DEBOUNCE: Duration = Duration::from_millis(200);
+
     let token = tokio_util::sync::CancellationToken::new();
     let token_clone = token.clone();
 
     std::thread::spawn(move || {
         let (std_tx, std_rx) = std_mpsc::channel();
-        let Ok(mut watcher) = recommended_watcher(std_tx) else { return };
-        if watcher.watch(&git_root, RecursiveMode::Recursive).is_err() { return };
+        let Ok(mut watcher) = recommended_watcher(std_tx) else {
+            return;
+        };
+        if watcher.watch(&git_root, RecursiveMode::Recursive).is_err() {
+            return;
+        }
 
-        // Debounce: wait until 200 ms of silence before firing GitReload.
-        const DEBOUNCE: Duration = Duration::from_millis(200);
         let mut pending: Option<Instant> = None;
 
         loop {
-            if token_clone.is_cancelled() { break; }
+            if token_clone.is_cancelled() {
+                break;
+            }
 
             // Non-blocking drain of all available events.
             loop {
                 match std_rx.try_recv() {
-                    Ok(_) => { pending = Some(Instant::now()); }
+                    Ok(_) => {
+                        pending = Some(Instant::now());
+                    }
                     Err(std_mpsc::TryRecvError::Empty) => break,
                     Err(std_mpsc::TryRecvError::Disconnected) => return,
                 }
@@ -2960,7 +3287,7 @@ impl App {
         };
         let name = matches.get(*selected)?;
         // Replace the filter part (after last `/`) with `name/`
-        let prefix_len = input.rfind('/').map(|i| i + 1).unwrap_or(0);
+        let prefix_len = input.rfind('/').map_or(0, |i| i + 1);
         Some(format!("{}{}/", &input[..prefix_len], name))
     }
 }
@@ -2987,8 +3314,8 @@ fn quick_cd_list_dirs(parent: &std::path::Path, filter: &str) -> Vec<String> {
         .ok()
         .into_iter()
         .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| filter.is_empty() || name.to_lowercase().contains(&filter_lower))
         .collect();
@@ -3002,10 +3329,7 @@ fn quick_cd_destination(
     selected: usize,
     base: &std::path::Path,
 ) -> std::path::PathBuf {
-    if !matches.is_empty() {
-        let (parent, _) = quick_cd_parse_input(input, base);
-        parent.join(&matches[selected.min(matches.len() - 1)])
-    } else {
+    if matches.is_empty() {
         // No matches — try to navigate to the raw input.
         let expanded = quick_cd_expand(input);
         if expanded.starts_with('/') {
@@ -3013,13 +3337,16 @@ fn quick_cd_destination(
         } else {
             base.join(expanded)
         }
+    } else {
+        let (parent, _) = quick_cd_parse_input(input, base);
+        parent.join(&matches[selected.min(matches.len() - 1)])
     }
 }
 
 fn quick_cd_expand(s: &str) -> String {
     if let Some(stripped) = s.strip_prefix('~') {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-        format!("{}{}", home, stripped)
+        format!("{home}{stripped}")
     } else {
         s.to_string()
     }
@@ -3036,7 +3363,7 @@ fn format_status_size(bytes: u64) -> String {
         unit += 1;
     }
     if unit == 0 {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     } else {
         format!("{:.1} {}", val, UNITS[unit])
     }
@@ -3046,9 +3373,63 @@ fn target_label(sources: &[std::path::PathBuf]) -> String {
     if sources.len() == 1 {
         sources[0]
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
+            .map_or_default(|n| n.to_string_lossy().into_owned())
     } else {
         format!("{} files", sources.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn empty_filter_claims_nothing() {
+        assert!(!filter_claims(
+            false,
+            &key(KeyCode::Char('j'), KeyModifiers::NONE)
+        ));
+        assert!(!filter_claims(
+            false,
+            &key(KeyCode::Char('?'), KeyModifiers::NONE)
+        ));
+    }
+
+    #[test]
+    fn active_filter_claims_typed_characters() {
+        for c in ['j', 'q', '?', '*'] {
+            assert!(
+                filter_claims(true, &key(KeyCode::Char(c), KeyModifiers::NONE)),
+                "{c}"
+            );
+        }
+        assert!(filter_claims(
+            true,
+            &key(KeyCode::Char('Y'), KeyModifiers::SHIFT)
+        ));
+    }
+
+    #[test]
+    fn active_filter_leaves_ctrl_alt_and_special_keys_to_bindings() {
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::Char('f'), KeyModifiers::CONTROL)
+        ));
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::Char('5'), KeyModifiers::ALT)
+        ));
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::F(5), KeyModifiers::NONE)
+        ));
+        assert!(!filter_claims(
+            true,
+            &key(KeyCode::Enter, KeyModifiers::NONE)
+        ));
     }
 }

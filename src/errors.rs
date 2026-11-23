@@ -2,6 +2,13 @@ use std::env;
 
 use tracing::error;
 
+// Each panic crate is only used in one build profile (see the panic hook below). These no-op
+// imports keep cargo's `unused_dependencies` lint quiet for the profile that doesn't use it.
+#[cfg(not(debug_assertions))]
+use better_panic as _;
+#[cfg(debug_assertions)]
+use human_panic as _;
+
 pub fn init() -> color_eyre::Result<()> {
     let (panic_hook, eyre_hook) = color_eyre::config::HookBuilder::default()
         .panic_section(format!(

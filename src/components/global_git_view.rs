@@ -10,7 +10,7 @@ use crate::action::Action;
 
 pub struct GlobalGitView {
     pub repos: Vec<PathBuf>,
-    /// Per-repo metadata loaded async: (branch, is_dirty)
+    /// Per-repo metadata loaded async: (branch, `is_dirty`)
     pub repo_meta: std::collections::HashMap<PathBuf, (Option<String>, bool)>,
     pub cursor: usize,
     offset: usize,
@@ -53,9 +53,9 @@ impl GlobalGitView {
     }
 
     /// Kick off async metadata loads for all repos.
-    pub fn load_all_meta(repos: Vec<PathBuf>, tx: UnboundedSender<Action>) {
+    pub fn load_all_meta(repos: &[PathBuf], tx: &UnboundedSender<Action>) {
         for path in repos {
-            Self::load_repo_meta(path, tx.clone());
+            Self::load_repo_meta(path.clone(), tx.clone());
         }
     }
 
@@ -75,8 +75,7 @@ impl GlobalGitView {
                                 .include_untracked(false)
                                 .include_ignored(false),
                         ))
-                        .map(|s| s.iter().any(|e| !e.status().is_empty()))
-                        .unwrap_or(false);
+                        .is_ok_and(|s| s.iter().any(|e| !e.status().is_empty()));
                     Ok::<_, git2::Error>((branch, is_dirty))
                 }
             })
@@ -85,7 +84,11 @@ impl GlobalGitView {
                 Ok(Ok(v)) => v,
                 _ => (None, false),
             };
-            let _ = tx.send(Action::GitRepoInfoLoaded { path, branch, is_dirty });
+            let _ = tx.send(Action::GitRepoInfoLoaded {
+                path,
+                branch,
+                is_dirty,
+            });
         });
     }
 
@@ -123,15 +126,14 @@ impl GlobalGitView {
                 let is_cursor = i == self.cursor;
                 let display_path = path.to_string_lossy();
 
-                let (branch_str, dirty_marker) =
-                    match self.repo_meta.get(path) {
-                        Some((branch, dirty)) => {
-                            let b = branch.as_deref().unwrap_or("?");
-                            let d = if *dirty { "*" } else { "" };
-                            (format!("[{}{}]", b, d), true)
-                        }
-                        None => ("…".into(), false),
-                    };
+                let (branch_str, dirty_marker) = match self.repo_meta.get(path) {
+                    Some((branch, dirty)) => {
+                        let b = branch.as_deref().unwrap_or("?");
+                        let d = if *dirty { "*" } else { "" };
+                        (format!("[{b}{d}]"), true)
+                    }
+                    None => ("…".into(), false),
+                };
 
                 let path_style = if is_cursor {
                     palette.border_active.add_modifier(Modifier::REVERSED)
@@ -150,8 +152,8 @@ impl GlobalGitView {
                 };
 
                 let line = Line::from(vec![
-                    Span::styled(format!(" {:<60}", display_path), path_style),
-                    Span::styled(format!(" {}", branch_str), meta_style),
+                    Span::styled(format!(" {display_path:<60}"), path_style),
+                    Span::styled(format!(" {branch_str}"), meta_style),
                 ]);
                 ListItem::new(line)
             })

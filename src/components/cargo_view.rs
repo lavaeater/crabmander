@@ -16,23 +16,71 @@ struct CargoCommand {
 }
 
 const CARGO_COMMANDS: &[CargoCommand] = &[
-    CargoCommand { label: "build", subcommand: "build", extra_args: "" },
-    CargoCommand { label: "build --release", subcommand: "build", extra_args: "--release" },
-    CargoCommand { label: "check", subcommand: "check", extra_args: "" },
-    CargoCommand { label: "run", subcommand: "run", extra_args: "" },
-    CargoCommand { label: "run --release", subcommand: "run", extra_args: "--release" },
-    CargoCommand { label: "test", subcommand: "test", extra_args: "" },
-    CargoCommand { label: "test --all-features", subcommand: "test", extra_args: "--all-features" },
-    CargoCommand { label: "clippy", subcommand: "clippy", extra_args: "" },
+    CargoCommand {
+        label: "build",
+        subcommand: "build",
+        extra_args: "",
+    },
+    CargoCommand {
+        label: "build --release",
+        subcommand: "build",
+        extra_args: "--release",
+    },
+    CargoCommand {
+        label: "check",
+        subcommand: "check",
+        extra_args: "",
+    },
+    CargoCommand {
+        label: "run",
+        subcommand: "run",
+        extra_args: "",
+    },
+    CargoCommand {
+        label: "run --release",
+        subcommand: "run",
+        extra_args: "--release",
+    },
+    CargoCommand {
+        label: "test",
+        subcommand: "test",
+        extra_args: "",
+    },
+    CargoCommand {
+        label: "test --all-features",
+        subcommand: "test",
+        extra_args: "--all-features",
+    },
+    CargoCommand {
+        label: "clippy",
+        subcommand: "clippy",
+        extra_args: "",
+    },
     CargoCommand {
         label: "clippy --all-features -D warnings",
         subcommand: "clippy",
         extra_args: "--all-features -- -D warnings",
     },
-    CargoCommand { label: "fmt --all", subcommand: "fmt", extra_args: "--all" },
-    CargoCommand { label: "doc --open", subcommand: "doc", extra_args: "--open" },
-    CargoCommand { label: "clean", subcommand: "clean", extra_args: "" },
-    CargoCommand { label: "update", subcommand: "update", extra_args: "" },
+    CargoCommand {
+        label: "fmt --all",
+        subcommand: "fmt",
+        extra_args: "--all",
+    },
+    CargoCommand {
+        label: "doc --open",
+        subcommand: "doc",
+        extra_args: "--open",
+    },
+    CargoCommand {
+        label: "clean",
+        subcommand: "clean",
+        extra_args: "",
+    },
+    CargoCommand {
+        label: "update",
+        subcommand: "update",
+        extra_args: "",
+    },
 ];
 
 // --- Dynamic command list entry ---
@@ -44,8 +92,10 @@ pub enum Entry {
 }
 
 impl Entry {
-    fn is_selectable(&self) -> bool {
-        true
+    const fn is_selectable(&self) -> bool {
+        match self {
+            Entry::Cargo { .. } => true,
+        }
     }
 }
 
@@ -60,8 +110,14 @@ pub struct CargoView {
 
 impl CargoView {
     pub fn new(cargo_root: PathBuf) -> Self {
-        let entries: Vec<Entry> = (0..CARGO_COMMANDS.len()).map(|idx| Entry::Cargo { idx }).collect();
-        Self { cargo_root, entries, cursor: 0 }
+        let entries: Vec<Entry> = (0..CARGO_COMMANDS.len())
+            .map(|idx| Entry::Cargo { idx })
+            .collect();
+        Self {
+            cargo_root,
+            entries,
+            cursor: 0,
+        }
     }
 
     fn selectable_count(&self) -> usize {
@@ -122,12 +178,18 @@ impl CargoView {
 
         // Compute display offset so the highlighted row stays visible.
         let real_cur = self.real_index();
-        let offset = if real_cur < list_h { 0 } else { real_cur + 1 - list_h };
+        let offset = if real_cur < list_h {
+            0
+        } else {
+            real_cur + 1 - list_h
+        };
 
         let mut sel_idx = 0usize; // running selectable counter for cursor matching
         // pre-count selectable entries before offset so we know sel_idx at offset
         for e in self.entries.iter().take(offset) {
-            if e.is_selectable() { sel_idx += 1; }
+            if e.is_selectable() {
+                sel_idx += 1;
+            }
         }
 
         let items: Vec<ListItem> = self
@@ -164,7 +226,10 @@ impl CargoView {
             hint_area,
         );
 
-        let list_area = Rect { height: list_h as u16, ..inner };
+        let list_area = Rect {
+            height: list_h as u16,
+            ..inner
+        };
         frame.render_widget(List::new(items), list_area);
     }
 }

@@ -1,15 +1,18 @@
 #![allow(dead_code)] // Remove this once you start using the code
 
-use std::{collections::HashMap, env, path::PathBuf};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use directories::ProjectDirs;
-use lazy_static::lazy_static;
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, de::Deserializer};
+use std::sync::LazyLock;
 use tracing::error;
 
-use crate::{action::Action, app::Mode};
+use crate::{
+    app::Mode,
+    keymap::{BindingProblem, Keymap, RawBindings},
+};
 
 const CONFIG: &str = include_str!("../.config/config.json5");
 
@@ -24,9 +27,13 @@ pub struct AppConfig {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     #[serde(default, flatten)]
-    pub config: AppConfig,
+    pub app: AppConfig,
+    /// Raw keybinding entries from the user's config; resolved into `Config::keymap`.
     #[serde(default)]
-    pub keybindings: KeyBindings,
+    pub keybindings: RawBindings,
+    /// Defaults merged with the user's keybindings. Built in `Config::new`.
+    #[serde(skip)]
+    pub keymap: Arc<Keymap>,
     #[serde(default)]
     pub styles: Styles,
     /// Opaline theme name (kebab-case). Run `crabmander --list-themes` to see options.
@@ -37,8 +44,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            config: AppConfig::default(),
-            keybindings: KeyBindings::default(),
+            app: AppConfig::default(),
+            keybindings: RawBindings::default(),
+            keymap: Arc::default(),
             styles: Styles::default(),
             theme: default_theme(),
         }
@@ -49,17 +57,23 @@ fn default_theme() -> String {
     "catppuccin-mocha".into()
 }
 
-lazy_static! {
-    pub static ref PROJECT_NAME: String = env!("CARGO_CRATE_NAME").to_uppercase().to_string();
-    pub static ref DATA_FOLDER: Option<PathBuf> =
-        env::var(format!("{}_DATA", PROJECT_NAME.clone()))
-            .ok()
-            .map(PathBuf::from);
-    pub static ref CONFIG_FOLDER: Option<PathBuf> =
-        env::var(format!("{}_CONFIG", PROJECT_NAME.clone()))
-            .ok()
-            .map(PathBuf::from);
+/// The keybindings shipped in the binary (`.config/config.json5`).
+pub fn default_keybindings() -> RawBindings {
+    json5::from_str::<Config>(CONFIG).map_or_else(|_| RawBindings::new(), |c| c.keybindings)
 }
+
+pub static PROJECT_NAME: LazyLock<String> =
+    LazyLock::new(|| env!("CARGO_CRATE_NAME").to_uppercase());
+pub static DATA_FOLDER: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    env::var(format!("{}_DATA", *PROJECT_NAME))
+        .ok()
+        .map(PathBuf::from)
+});
+pub static CONFIG_FOLDER: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
+    env::var(format!("{}_CONFIG", *PROJECT_NAME))
+        .ok()
+        .map(PathBuf::from)
+});
 
 impl Config {
     pub fn new() -> color_eyre::Result<Self, config::ConfigError> {
@@ -84,26 +98,37 @@ impl Config {
                 .required(false);
             builder = builder.add_source(source);
             if config_dir.join(file).exists() {
-                found_config = true
+                found_config = true;
             }
         }
         if !found_config {
             error!("No configuration file found. Application may not behave as expected");
         }
 
-        let mut cfg: Self = builder.build()?.try_deserialize()?;
-
-        for (mode, default_bindings) in default_config.keybindings.0.iter() {
-            let user_bindings = cfg.keybindings.0.entry(*mode).or_default();
-            for (key, cmd) in default_bindings.iter() {
-                user_bindings
-                    .entry(key.clone())
-                    .or_insert_with(|| cmd.clone());
+        // A broken user config must not stop startup (FR-009): use the defaults and report it.
+        let (mut cfg, unreadable) = match builder.build().and_then(config::Config::try_deserialize)
+        {
+            Ok(cfg) => (cfg, None),
+            Err(err) => {
+                error!("could not read the config file, using defaults: {err}");
+                let cfg = Self {
+                    app: AppConfig {
+                        data_dir,
+                        config_dir,
+                    },
+                    keybindings: RawBindings::new(),
+                    ..default_config.clone()
+                };
+                (cfg, Some(BindingProblem::config_unreadable(err)))
             }
-        }
-        for (mode, default_styles) in default_config.styles.0.iter() {
+        };
+
+        let mut keymap = Keymap::build(&default_config.keybindings, &cfg.keybindings);
+        keymap.problems.splice(0..0, unreadable);
+        cfg.keymap = Arc::new(keymap);
+        for (mode, default_styles) in &default_config.styles.0 {
             let user_styles = cfg.styles.0.entry(*mode).or_default();
-            for (style_key, style) in default_styles.iter() {
+            for (style_key, style) in default_styles {
                 user_styles.entry(style_key.clone()).or_insert(*style);
             }
         }
@@ -136,35 +161,14 @@ fn project_directory() -> Option<ProjectDirs> {
     ProjectDirs::from("com", "kdheepak", env!("CARGO_PKG_NAME"))
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct KeyBindings(pub HashMap<Mode, HashMap<Vec<KeyEvent>, Action>>);
-
-impl<'de> Deserialize<'de> for KeyBindings {
-    fn deserialize<D>(deserializer: D) -> color_eyre::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let parsed_map = HashMap::<Mode, HashMap<String, Action>>::deserialize(deserializer)?;
-
-        let keybindings = parsed_map
-            .into_iter()
-            .map(|(mode, inner_map)| {
-                let converted_inner_map = inner_map
-                    .into_iter()
-                    .map(|(key_str, cmd)| (parse_key_sequence(&key_str).unwrap(), cmd))
-                    .collect();
-                (mode, converted_inner_map)
-            })
-            .collect();
-
-        Ok(KeyBindings(keybindings))
-    }
-}
-
+/// Parses one key (`ctrl-a`, `F5`, `<`-less). Modifier and key names are case-insensitive; a
+/// single character is taken as written, so `Y` means Shift+Y.
 fn parse_key_event(raw: &str) -> color_eyre::Result<KeyEvent, String> {
-    let raw_lower = raw.to_ascii_lowercase();
-    let (remaining, modifiers) = extract_modifiers(&raw_lower);
-    parse_key_code_with_modifiers(remaining, modifiers)
+    let (remaining, modifiers) = extract_modifiers(raw);
+    if remaining.chars().count() == 1 {
+        return parse_key_code_with_modifiers(remaining, modifiers);
+    }
+    parse_key_code_with_modifiers(&remaining.to_ascii_lowercase(), modifiers)
 }
 
 fn extract_modifiers(raw: &str) -> (&str, KeyModifiers) {
@@ -172,21 +176,25 @@ fn extract_modifiers(raw: &str) -> (&str, KeyModifiers) {
     let mut current = raw;
 
     loop {
-        match current {
-            rest if rest.starts_with("ctrl-") => {
-                modifiers.insert(KeyModifiers::CONTROL);
-                current = &rest[5..];
+        let mut matched = false;
+        for (prefix, modifier) in [
+            ("ctrl-", KeyModifiers::CONTROL),
+            ("alt-", KeyModifiers::ALT),
+            ("shift-", KeyModifiers::SHIFT),
+        ] {
+            // A lone "-" after a modifier is the minus key, not another prefix.
+            if current.len() > prefix.len()
+                && current.is_char_boundary(prefix.len())
+                && current[..prefix.len()].eq_ignore_ascii_case(prefix)
+            {
+                modifiers.insert(modifier);
+                current = &current[prefix.len()..];
+                matched = true;
             }
-            rest if rest.starts_with("alt-") => {
-                modifiers.insert(KeyModifiers::ALT);
-                current = &rest[4..];
-            }
-            rest if rest.starts_with("shift-") => {
-                modifiers.insert(KeyModifiers::SHIFT);
-                current = &rest[6..];
-            }
-            _ => break, // break out of the loop if no known prefix is detected
-        };
+        }
+        if !matched {
+            break;
+        }
     }
 
     (current, modifiers)
@@ -227,11 +235,11 @@ fn parse_key_code_with_modifiers(
         "f11" => KeyCode::F(11),
         "f12" => KeyCode::F(12),
         "space" => KeyCode::Char(' '),
-        "hyphen" => KeyCode::Char('-'),
-        "minus" => KeyCode::Char('-'),
+        "hyphen" | "minus" => KeyCode::Char('-'),
+        "equals" => KeyCode::Char('='),
         "tab" => KeyCode::Tab,
-        c if c.len() == 1 => {
-            let mut c = c.chars().next().unwrap();
+        c if c.chars().count() == 1 => {
+            let mut c = c.chars().next().unwrap_or_default();
             if modifiers.contains(KeyModifiers::SHIFT) {
                 c = c.to_ascii_uppercase();
             }
@@ -269,16 +277,16 @@ pub fn key_event_to_string(key_event: &KeyEvent) -> String {
             &char
         }
         KeyCode::Esc => "esc",
-        KeyCode::Null => "",
-        KeyCode::CapsLock => "",
-        KeyCode::Menu => "",
-        KeyCode::ScrollLock => "",
-        KeyCode::Media(_) => "",
-        KeyCode::NumLock => "",
-        KeyCode::PrintScreen => "",
-        KeyCode::Pause => "",
-        KeyCode::KeypadBegin => "",
-        KeyCode::Modifier(_) => "",
+        KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::Menu
+        | KeyCode::ScrollLock
+        | KeyCode::Media(_)
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::KeypadBegin
+        | KeyCode::Modifier(_) => "",
     };
 
     let mut modifiers = Vec::with_capacity(3);
@@ -307,14 +315,14 @@ pub fn key_event_to_string(key_event: &KeyEvent) -> String {
 
 pub fn parse_key_sequence(raw: &str) -> color_eyre::Result<Vec<KeyEvent>, String> {
     if raw.chars().filter(|c| *c == '>').count() != raw.chars().filter(|c| *c == '<').count() {
-        return Err(format!("Unable to parse `{}`", raw));
+        return Err(format!("Unable to parse `{raw}`"));
     }
-    let raw = if !raw.contains("><") {
+    let raw = if raw.contains("><") {
+        raw
+    } else {
         let raw = raw.strip_prefix('<').unwrap_or(raw);
 
         raw.strip_prefix('>').unwrap_or(raw)
-    } else {
-        raw
     };
     let sequences = raw
         .split("><")
@@ -466,6 +474,125 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::*;
+    use crate::{
+        action::Action,
+        keymap::{KeyContext, Lookup, parse_seq},
+    };
+
+    fn defaults() -> RawBindings {
+        default_keybindings()
+    }
+
+    /// Loads a user config string the way `Config::new` loads files.
+    fn user_config(text: &str, format: config::FileFormat) -> RawBindings {
+        config::Config::builder()
+            .add_source(config::File::from_str(text, format))
+            .build()
+            .unwrap()
+            .try_deserialize::<Config>()
+            .unwrap()
+            .keybindings
+    }
+
+    #[test]
+    fn default_config_builds_a_keymap() {
+        let km = Keymap::build(&defaults(), &RawBindings::new());
+        assert_eq!(km.problems, vec![]);
+        let normal = [KeyContext::Normal];
+        assert_eq!(
+            km.resolve(&normal, &parse_seq("<f5>").unwrap()),
+            Lookup::Action(Action::Copy)
+        );
+        let git = [KeyContext::Git];
+        assert_eq!(
+            km.resolve(&git, &parse_seq("<a>").unwrap()),
+            Lookup::Action(Action::GitStage)
+        );
+    }
+
+    #[test]
+    fn old_style_user_config_still_loads() {
+        let user = user_config(
+            r#"{ "keybindings": { "Normal": { "<ctrl-y>": "Copy", "<Ctrl-q>": "Quit" } } }"#,
+            config::FileFormat::Json5,
+        );
+        let km = Keymap::build(&defaults(), &user);
+        assert_eq!(km.problems, vec![]);
+        let normal = [KeyContext::Normal];
+        assert_eq!(
+            km.resolve(&normal, &parse_seq("<ctrl-y>").unwrap()),
+            Lookup::Action(Action::Copy)
+        );
+        assert_eq!(
+            km.resolve(&normal, &parse_seq("<ctrl-q>").unwrap()),
+            Lookup::Action(Action::Quit)
+        );
+        assert_eq!(
+            km.resolve(&normal, &parse_seq("<f5>").unwrap()),
+            Lookup::Action(Action::Copy)
+        );
+    }
+
+    #[test]
+    fn removal_works_in_every_config_format() {
+        let cases = [
+            (
+                "keybindings:\n  Normal:\n    \"<q>\": ~\n    \"<ctrl-y>\": Copy\n",
+                config::FileFormat::Yaml,
+            ),
+            (
+                "[keybindings.Normal]\n\"<q>\" = \"Unbind\"\n\"<ctrl-y>\" = \"Copy\"\n",
+                config::FileFormat::Toml,
+            ),
+            (
+                r#"{ "keybindings": { "Normal": { "<q>": null, "<ctrl-y>": "Copy" } } }"#,
+                config::FileFormat::Json,
+            ),
+        ];
+        for (text, format) in cases {
+            let km = Keymap::build(&defaults(), &user_config(text, format));
+            assert_eq!(km.problems, vec![], "{format:?}");
+            let normal = [KeyContext::Normal];
+            assert_eq!(
+                km.resolve(&normal, &parse_seq("<q>").unwrap()),
+                Lookup::None,
+                "{format:?}"
+            );
+            assert_eq!(
+                km.resolve(&normal, &parse_seq("<ctrl-y>").unwrap()),
+                Lookup::Action(Action::Copy),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn equals_key_name() {
+        assert_eq!(
+            parse_key_event("alt-equals").unwrap(),
+            KeyEvent::new(KeyCode::Char('='), KeyModifiers::ALT)
+        );
+        assert_eq!(
+            parse_key_event("alt-=").unwrap(),
+            parse_key_event("alt-equals").unwrap()
+        );
+        assert_eq!(
+            parse_key_event("alt--").unwrap(),
+            KeyEvent::new(KeyCode::Char('-'), KeyModifiers::ALT)
+        );
+    }
+
+    #[test]
+    fn single_characters_keep_their_case() {
+        assert_eq!(
+            parse_key_event("Y").unwrap(),
+            KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key_event("Ctrl-q").unwrap(),
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)
+        );
+    }
 
     #[test]
     fn test_parse_style_default() {

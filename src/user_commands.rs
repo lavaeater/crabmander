@@ -59,10 +59,13 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip() {
-        let dir = std::env::temp_dir()
-            .join(format!("crabmander-test-user-cmds-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("crabmander-test-user-cmds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let expected = vec!["ffmpeg -i {file} out.mp3".to_owned(), "cp {file} {other}".to_owned()];
+        let expected = vec![
+            "ffmpeg -i {file} out.mp3".to_owned(),
+            "cp {file} {other}".to_owned(),
+        ];
         save(&dir, &expected);
         let loaded = load(&dir);
         assert_eq!(loaded, expected);
