@@ -44,13 +44,20 @@ fn install_desktop_entry() -> color_eyre::Result<()> {
     let exe = std::env::current_exe()?;
     let exe_path = exe.display();
 
+    // Prefer a terminal with the kitty keyboard protocol (reliable F-keys and Alt+Shift+digit);
+    // otherwise let the desktop pick its default terminal.
+    let (exec, terminal) = match preferred_terminal() {
+        Some((term, args)) => (format!("{term} {args}{exe_path}"), false),
+        None => (exe_path.to_string(), true),
+    };
+
     let desktop = format!(
         "[Desktop Entry]\n\
          Name=Crabmander\n\
          Comment=Twin-pane TUI file manager\n\
-         Exec={exe_path}\n\
+         Exec={exec}\n\
          Icon=utilities-file-manager\n\
-         Terminal=true\n\
+         Terminal={terminal}\n\
          Type=Application\n\
          Categories=Utility;FileManager;\n\
          Keywords=files;manager;tui;\n"
@@ -70,6 +77,21 @@ fn install_desktop_entry() -> color_eyre::Result<()> {
     println!("Desktop entry installed to {}", path.display());
     println!("You may need to log out and back in for it to appear in your menu.");
     Ok(())
+}
+
+/// The first installed terminal of `wezterm`, `kitty`, `foot` and `alacritty`, with the arguments that make
+/// it run a command.
+fn preferred_terminal() -> Option<(&'static str, &'static str)> {
+    const TERMINALS: [(&str, &str); 4] = [
+        ("wezterm", "start -- "),
+        ("kitty", ""),
+        ("foot", ""),
+        ("alacritty", "-e "),
+    ];
+    let path = std::env::var_os("PATH")?;
+    TERMINALS
+        .into_iter()
+        .find(|(term, _)| std::env::split_paths(&path).any(|dir| dir.join(term).is_file()))
 }
 
 fn dirs_next() -> std::path::PathBuf {

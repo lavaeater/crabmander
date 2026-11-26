@@ -277,6 +277,7 @@ impl App {
     fn handle_key_event(&mut self, raw_key: KeyEvent) -> color_eyre::Result<()> {
         let tx = self.action_tx.clone();
         let key = keymap::normalize(raw_key);
+        debug!(?raw_key, ?key, "key");
 
         // Ctrl+C always quits, whatever the config says (FR-010).
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {

@@ -44,9 +44,10 @@ crabmander --install-desktop-entry
 ```
 
 This writes `~/.local/share/applications/crabmander.desktop` and calls
-`update-desktop-database` automatically. It auto-detects your terminal emulator
-(tries `alacritty`, `kitty`, `foot`, `xterm` in that order). Edit the file
-afterward to hardcode your preferred terminal if needed.
+`update-desktop-database` automatically. It launches crabmander in the first terminal it finds
+of `wezterm`, `kitty`, `foot` and `alacritty` (all support the kitty keyboard protocol, so
+F-keys and `Alt+Shift+digit` work), or else in your desktop's default terminal. Run it again
+after installing a new terminal, or edit `Exec=` in the file to choose another.
 
 ## Modes
 
@@ -135,6 +136,11 @@ Every F-key has two fallbacks for terminals or desktops that intercept function 
 > your layout puts on Shift+6 (`&` on Swedish, `^` on US), so `Alt+Shift+6` does not match. Use
 > `Ctrl+F s 6`, or bind the symbol yourself: `"<alt-&>": "Rename"`. The help screen tells you
 > when your terminal is one of these.
+>
+> **WezTerm on non-US layouts.** WezTerm reports Alt+Shift+digit as the US digit whose Shift
+> symbol matches your layout's: on Swedish, Alt+Shift+6 (`&`) arrives as Alt+Shift+7 and
+> Alt+Shift+8 (`(`) as Alt+Shift+9. Plain Alt+digit and the F-keys work. For the Shift actions
+> use the F-keys or `Ctrl+F s digit`.
 
 The `Shift+letter` fallbacks of earlier versions (`Shift+Y` copy, `Shift+R` move, …) are gone.
 To get them back, add this to your config:
